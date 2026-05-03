@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  /* sticky live header */
+  .live-banner {
+    position: sticky; top: 0; z-index: 10;
+    background: #ecfdf5; border: 1px solid #10b981; border-left-width: 5px;
+    border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 1rem;
+    display: grid; grid-template-columns: 80px 1fr auto; gap: 1rem; align-items: center;
+  }
+  .live-banner .live-num { font-size: 1.6rem; font-weight: 700; color: #047857; line-height: 1; }
+  .live-banner .live-num small { display: block; font-size: 0.7rem; color: #047857; margin-top: 0.2rem; font-weight: 500; }
+  .live-banner h3 { margin: 0 0 0.2rem 0; font-size: 0.95rem; }
+  .live-banner p { margin: 0; font-size: 0.85rem; color: #444; line-height: 1.4; }
+  .pulse { display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; margin-right: 0.4rem; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .run-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 1rem; }
+  .run-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.6rem; margin-bottom: 1.2rem; }
+  .stat { background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 0.6rem 0.8rem; }
+  .stat-label { font-size: 0.65rem; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-value { font-size: 1.3rem; font-weight: 600; margin-top: 0.1rem; }
+
+  .iter-card {
+    display: grid; grid-template-columns: 60px 1fr 200px;
+    gap: 1rem; padding: 0.7rem 1rem; border: 1px solid #eee;
+    border-radius: 6px; margin-bottom: 0.4rem; align-items: center;
+  }
+  .iter-card.kept { border-left: 4px solid #059669; }
+  .iter-card.reverted { border-left: 4px solid #dc2626; }
+  .iter-card.failed { border-left: 4px solid #f59e0b; }
+  .iter-card.in-progress { border-left: 4px solid #3b82f6; background: #eff6ff; }
+  .iter-num { font-size: 1.4rem; font-weight: 700; color: #374151; line-height: 1; }
+  .iter-num small { display: block; font-size: 0.65rem; font-weight: 400; color: #6b7280; margin-top: 0.2rem; }
+  .iter-body { min-width: 0; }
+  .iter-body .pills { margin-bottom: 0.3rem; font-size: 0; }
+  .iter-body .pills .pill { font-size: 0.7rem; }
+  .iter-body p { margin: 0.15rem 0; line-height: 1.35; font-size: 0.82rem; color: #444; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .iter-body p.lesson { color: #666; font-style: italic; padding-left: 0.5rem; border-left: 2px solid #ddd; }
+  .iter-body .label { color: #6b7280; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .iter-stats { text-align: right; }
+  .iter-stats .delta { font-size: 1.3rem; font-weight: 700; }
+  .iter-stats .delta.up { color: #047857; }
+  .iter-stats .delta.down { color: #b91c1c; }
+  .iter-stats .delta.flat { color: #6b7280; }
+  .iter-stats .scores { font-size: 0.75rem; color: #6b7280; margin-top: 0.1rem; }
+  .iter-stats .fixture-bars { margin-top: 0.4rem; display: flex; gap: 2px; justify-content: flex-end; }
+  .iter-stats .fixture-bars span { display: inline-block; width: 11px; height: 11px; border-radius: 2px; background: #ef4444; }
+  .iter-stats .fixture-bars span.partial { background: #f59e0b; }
+  .iter-stats .fixture-bars span.full { background: #10b981; }
+  .iter-stats .fixture-bars span.empty { background: #e5e7eb; }
+  .pill-cat { background: #e0e7ff; color: #3730a3; }
+  svg#score { background: #fafafa; border-radius: 8px; }
+  .show-toggle { display: inline-block; margin-left: 0.5rem; font-size: 0.85rem; color: #06c; }
+</style>
+
+{% if live %}
+<div class="live-banner" hx-get="/run/{{ run.id }}" hx-trigger="every 5s" hx-swap="outerHTML" hx-select=".live-banner">
+  <div class="live-num">
+    {{ live.iter_num }}
+    <small>iter</small>
+  </div>
+  <div>
+    <h3><span class="pulse"></span>iter {{ live.iter_num }} · phase: <strong>{{ live.phase }}</strong>{% if live.category %} · category: <strong>{{ live.category }}</strong>{% endif %}</h3>
+    {% if live.hypothesis %}<p>{{ (live.hypothesis or "")[:280] }}{% if (live.hypothesis or "")|length > 280 %}…{% endif %}</p>{% endif %}
+  </div>
+  <a href="/iter/{{ live.id }}" style="font-size: 0.85rem; color: #047857;">open →</a>
+</div>
+{% endif %}
+
+<div class="run-header">
+  <div>
+    <h1 style="margin-bottom: 0.2rem">{{ run.problem_name }}</h1>
+    <div class="mono" style="color:#666; font-size:0.85rem">{{ run.id[:8] }}… · {{ run.status }} · started {{ run.started_at }}</div>
+  </div>
+  <a href="/" style="color:#06c">← all runs</a>
+</div>
+
+<div class="run-stats">
+  <div class="stat">
+    <div class="stat-label">best score</div>
+    <div class="stat-value">
+      {% set best = iters | selectattr("score_after", "ne", None) | map(attribute="score_after") | list %}
+      {{ "%.4f"|format(best | max) if best else "—" }}
+    </div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">total iters</div>
+    <div class="stat-value">{{ all_count }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">kept</div>
+    <div class="stat-value" style="color: #047857">
+      {{ iters | selectattr("kept", "equalto", 1) | list | length }}
+    </div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">gemini cost</div>
+    <div class="stat-value">${{ "%.3f"|format(run.gemini_cost_usd or 0) }}</div>
+    <div style="font-size:0.65rem;color:#9ca3af;margin-top:0.1rem">
+      claude (sunk): ${{ "%.2f"|format(run.claude_cost_usd or 0) }}
+    </div>
+  </div>
+</div>
+
+<h2 style="font-size: 1rem">Score over time</h2>
+<svg id="score" width="100%" height="200"></svg>
+<script>
+const RUN_ID = "{{ run.id }}";
+fetch(`/run/${RUN_ID}/score-curve`).then(r => r.json()).then(d => {
+  const svg = document.getElementById("score");
+  if (!d.x.length) { svg.innerHTML = '<text x="20" y="40" fill="#999">no scored iters yet</text>'; return; }
+  const W = svg.clientWidth || 800, H = 200, PAD = 36;
+  const xMax = Math.max(...d.x, 1), xMin = Math.min(...d.x, 1);
+  const sx = i => PAD + ((d.x[i] - xMin) / Math.max(xMax - xMin, 1)) * (W - 2*PAD);
+  const sy = v => H - PAD - v * (H - 2*PAD);
+  const path = d.x.map((_, i) => `${i === 0 ? "M" : "L"}${sx(i)},${sy(d.y[i])}`).join(" ");
+  const dots = d.x.map((_, i) => `<circle cx="${sx(i)}" cy="${sy(d.y[i])}" r="3.5" fill="#06c"/>`).join("");
+  let grid = "";
+  for (const v of [0, 0.25, 0.5, 0.75, 1.0]) {
+    grid += `<line x1="${PAD}" x2="${W-PAD}" y1="${sy(v)}" y2="${sy(v)}" stroke="#e5e7eb" stroke-dasharray="3"/>
+             <text x="${PAD-8}" y="${sy(v)+4}" text-anchor="end" fill="#9ca3af" font-size="10">${v.toFixed(2)}</text>`;
+  }
+  svg.innerHTML = grid + `<line x1="${PAD}" x2="${W-PAD}" y1="${sy(1)}" y2="${sy(1)}" stroke="#10b981" stroke-dasharray="4"/>
+    <path d="${path}" stroke="#06c" fill="none" stroke-width="2"/>` + dots;
+});
+</script>
+
+<h2 style="font-size: 1rem; margin-top: 1.5rem">
+  Iterations
+  <span style="font-weight: 400; color: #6b7280; font-size: 0.85rem">
+    (most recent first — showing {{ showing }} of {{ all_count }})
+  </span>
+  {% if showing != "all" and all_count > 20 %}
+    <a href="?show=all" class="show-toggle">show all {{ all_count }}</a>
+  {% elif showing == "all" %}
+    <a href="?" class="show-toggle">show only top 20</a>
+  {% endif %}
+</h2>
+
+{% if iters %}
+  {% for it in iters %}
+    {% set delta = (it.score_after - it.score_before) if it.score_after is not none else 0 %}
+    {% set kls = "kept" if it.kept == 1 else ("reverted" if it.kept == 0 else ("in-progress" if it.phase in ["pending","planning","acting","reflecting"] else "failed")) %}
+    <a href="/iter/{{ it.id }}" style="text-decoration: none; color: inherit; display: block">
+      <div class="iter-card {{ kls }}">
+        <div class="iter-num">
+          {{ it.iter_num }}
+          <small>{{ it.duration_seconds or 0 }}s</small>
+        </div>
+        <div class="iter-body">
+          <div class="pills">
+            {% if it.category %}<span class="pill pill-cat">{{ it.category }}</span> {% endif %}
+            {% if it.kept == 1 %}<span class="pill pill-kept">kept</span>
+            {% elif it.kept == 0 %}<span class="pill pill-reverted">reverted</span>
+            {% elif it.phase in ["pending","planning","acting","reflecting"] %}<span class="pill" style="background:#dbeafe;color:#1e40af">{{ it.phase }}</span>
+            {% else %}<span class="pill" style="background:#fef3c7;color:#92400e">{{ it.phase }}</span>{% endif %}
+          </div>
+          {% if it.hypothesis %}<p><span class="label">hyp:</span> {{ it.hypothesis }}</p>{% endif %}
+          {% if it.lesson %}<p class="lesson"><span class="label">lesson:</span> {{ it.lesson }}</p>{% endif %}
+        </div>
+        <div class="iter-stats">
+          <div class="delta {% if delta > 0 %}up{% elif delta < 0 %}down{% else %}flat{% endif %}">
+            {% if it.score_after is not none %}{{ "%+.3f"|format(delta) }}{% else %}—{% endif %}
+          </div>
+          <div class="scores">
+            {{ "%.3f"|format(it.score_before) }} → {{ "%.3f"|format(it.score_after) if it.score_after is not none else "—" }}
+          </div>
+          {% if it.per_fixture_scores %}
+            {% set fixtures = it.per_fixture_scores | from_json %}
+            <div class="fixture-bars">
+              {% for fname, fs in fixtures.items() %}
+                <span class="{% if fs == 1 %}full{% elif fs > 0 %}partial{% else %}empty{% endif %}" title="{{ fname }}: {{ '%.2f'|format(fs) }}"></span>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </a>
+  {% endfor %}
+{% else %}
+  <p style="color:#888">(no iterations yet)</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .run-row { display: grid; grid-template-columns: 90px 1fr 200px 100px 80px; gap: 1rem; padding: 0.8rem 1rem; border: 1px solid #eee; border-radius: 8px; margin-bottom: 0.5rem; align-items: center; }
+  .run-row:hover { background: #fafafa; }
+  .run-row.running { border-left: 4px solid #10b981; background: #f0fdf4; }
+  .run-row.done { border-left: 4px solid #94a3b8; }
+  .run-status { font-size: 0.8rem; }
+  .run-score { font-size: 1.4rem; font-weight: 700; text-align: right; color: #374151; }
+  .run-cost { font-size: 0.85rem; text-align: right; }
+  .run-cost .gemini { color: #111; font-weight: 600; }
+  .run-cost .claude { color: #9ca3af; font-size: 0.75rem; }
+  .run-name { font-size: 1.05rem; font-weight: 600; color: #111; }
+  .run-time { color: #6b7280; font-size: 0.8rem; margin-top: 0.2rem; }
+</style>
+
+<h1>autoresearch</h1>
+
+{% if live %}
+  <h2>● Live</h2>
+  {% for r in live %}
+    <a href="/run/{{ r.id }}" style="text-decoration: none">
+      <div class="run-row running">
+        <span class="pill pill-running">running</span>
+        <div>
+          <div class="run-name">{{ r.problem_name }}</div>
+          <div class="run-time mono">{{ r.id[:8] }} · started {{ r.started_at }}</div>
+        </div>
+        <div></div>
+        <div class="run-score">{{ "%.3f"|format(r.final_score) if r.final_score is not none else "…" }}</div>
+        <div class="run-cost">
+        <div class="gemini">${{ "%.3f"|format(r.gemini_cost_usd or 0) }}</div>
+        <div class="claude">+${{ "%.2f"|format(r.claude_cost_usd or 0) }} claude</div>
+      </div>
+      </div>
+    </a>
+  {% endfor %}
+{% endif %}
+
+<h2 style="margin-top: 1.5rem">All runs</h2>
+{% if runs %}
+  {% for r in runs %}
+  <a href="/run/{{ r.id }}" style="text-decoration: none; color: inherit">
+    <div class="run-row {{ r.status }}">
+      <span class="pill pill-{{ r.status }}">{{ r.status }}</span>
+      <div>
+        <div class="run-name">{{ r.problem_name }}</div>
+        <div class="run-time mono">{{ r.id[:8] }} · {{ r.started_at }}</div>
+      </div>
+      <div class="run-time">
+        {% if r.exit_reason %}exit: {{ r.exit_reason }}{% endif %}
+      </div>
+      <div class="run-score">{{ "%.3f"|format(r.final_score) if r.final_score is not none else "—" }}</div>
+      <div class="run-cost">
+        <div class="gemini">${{ "%.3f"|format(r.gemini_cost_usd or 0) }}</div>
+        <div class="claude">+${{ "%.2f"|format(r.claude_cost_usd or 0) }} claude</div>
+      </div>
+    </div>
+  </a>
+  {% endfor %}
+{% else %}
+  <p style="color: #888">no runs yet — try <code>autoresearch run &lt;problem&gt;</code></p>
+{% endif %}
+{% endblock %}

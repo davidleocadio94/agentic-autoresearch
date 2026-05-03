@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>search</h1>
+<form method="get" action="/search">
+  <input name="q" value="{{ q }}" placeholder="search hypotheses and lessons" style="width:60%">
+  <button>go</button>
+</form>
+{% if rows %}
+<h2>results</h2>
+<table>
+  <thead><tr><th>iter</th><th>category</th><th>kept</th><th>hypothesis</th><th>lesson</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td><a href="/iter/{{ r.id }}">{{ r.iter_num }}</a></td>
+      <td>{{ r.category }}</td>
+      <td>{{ r.kept }}</td>
+      <td>{{ (r.hypothesis or "")[:140] }}</td>
+      <td>{{ (r.lesson or "")[:140] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

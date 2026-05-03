@@ -1,0 +1,191 @@
+"""`autoresearch` CLI."""
+
+from __future__ import annotations
+
+import os
+import signal
+import threading
+import time
+from pathlib import Path
+
+import click
+
+from agentic_autoresearch.cli.scaffold import scaffold
+from agentic_autoresearch.memory import store
+from agentic_autoresearch.memory.schema import init_db
+from agentic_autoresearch.orchestrator.loop import LoopOptions, run_loop
+from agentic_autoresearch.paths import db_path, home
+
+
+@click.group()
+def cli():
+    """plug in a spec.md, get a working repo."""
+
+
+@cli.command()
+@click.argument("name")
+@click.option("--parent", type=click.Path(file_okay=False, path_type=Path), default=Path.cwd())
+def new(name: str, parent: Path):
+    """Scaffold a new problem repo: <parent>/<name>/spec.md + eval/."""
+    repo = scaffold(name, parent)
+    click.echo(f"scaffolded {repo}")
+    click.echo("next steps:")
+    click.echo(f"  1. edit {repo}/spec.md")
+    click.echo(f"  2. implement {repo}/eval/score.py")
+    click.echo(f"  3. run: autoresearch run {repo}")
+
+
+@cli.command()
+@click.argument("problem", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--max-hours", type=float, default=None)
+@click.option("--max-iters", type=int, default=None)
+@click.option("--target-score", type=float, default=None)
+@click.option("--dashboard/--no-dashboard", default=True)
+def run(problem: Path, max_hours, max_iters, target_score, dashboard: bool):
+    """Run the autoresearch loop on PROBLEM until exit condition."""
+    spec_path = problem / "spec.md"
+    if not spec_path.exists():
+        raise click.UsageError(f"no spec.md in {problem}")
+    init_db()
+    if dashboard:
+        _start_dashboard_thread()
+    opts = LoopOptions(
+        max_hours=max_hours, max_iters=max_iters, target_score=target_score
+    )
+    rid = run_loop(spec_path, opts)
+    click.echo(f"run finished: {rid}")
+
+
+@cli.command()
+def resume():
+    """Reconcile DB state after a crash. Marks orphan iters as abandoned,
+    closes dead processes, ends runs whose orchestrator is gone."""
+    init_db()
+    cleaned_iters = 0
+    cleaned_procs = 0
+    cleaned_runs = 0
+
+    # 1. orphan iters → abandoned
+    for r in store.open_phase_iters():
+        store.update_iteration(r["id"], phase="abandoned", kept=0)
+        click.echo(f"  iter {r['iter_num']}: abandoned (was {r['phase']})")
+        cleaned_iters += 1
+
+    # 2. dead processes → end_process
+    for r in store.alive_processes():
+        if not _pid_alive(r["pid"]):
+            store.end_process(r["pid"])
+            click.echo(f"  process pid={r['pid']} ({r['role']}): cleared (dead)")
+            cleaned_procs += 1
+
+    # 3. running runs without a live orchestrator → end as 'crashed'
+    from agentic_autoresearch.memory.schema import connect
+
+    c = connect()
+    try:
+        runs = list(
+            c.execute("SELECT id FROM runs WHERE status='running'").fetchall()
+        )
+    finally:
+        c.close()
+    alive_orch = {r["pid"] for r in store.alive_processes("orchestrator")}
+    for r in runs:
+        c = connect()
+        try:
+            has_alive = c.execute(
+                "SELECT 1 FROM processes WHERE run_id=? AND role='orchestrator' "
+                "AND ended_at IS NULL",
+                (r["id"],),
+            ).fetchone()
+        finally:
+            c.close()
+        if not has_alive or all(not _pid_alive(p) for p in alive_orch):
+            store.end_run(r["id"], exit_reason="crashed", final_score=None)
+            click.echo(f"  run {r['id'][:8]}: ended (orchestrator gone)")
+            cleaned_runs += 1
+
+    if cleaned_iters == 0 and cleaned_procs == 0 and cleaned_runs == 0:
+        click.echo("nothing to resume.")
+    else:
+        click.echo(
+            f"reconciled: {cleaned_iters} iter(s), {cleaned_procs} proc(s), "
+            f"{cleaned_runs} run(s). start fresh with `autoresearch run <problem>`."
+        )
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except Exception:
+        return False
+
+
+@cli.command()
+def stop():
+    """SIGTERM the live orchestrator. Idempotent."""
+    init_db()
+    alive = store.alive_processes("orchestrator")
+    if not alive:
+        click.echo("no orchestrator running.")
+        return
+    for r in alive:
+        try:
+            os.kill(r["pid"], signal.SIGTERM)
+            click.echo(f"  SIGTERM → pid {r['pid']}")
+        except ProcessLookupError:
+            store.end_process(r["pid"])
+            click.echo(f"  pid {r['pid']} already gone; cleared registry")
+
+
+@cli.command(name="self-test")
+def self_test():
+    """Run the bundled hello-world problem to prove the loop is healthy."""
+    here = Path(__file__).resolve().parents[3]  # repo root
+    problem = here / "problems" / "hello-world"
+    if not problem.exists():
+        raise click.UsageError(f"hello-world bundle missing at {problem}")
+    spec_path = problem / "spec.md"
+    init_db()
+    rid = run_loop(spec_path, LoopOptions(max_iters=2, max_hours=0.25))
+    click.echo(f"self-test run: {rid}")
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1")
+@click.option("--port", default=8765)
+def dashboard(host: str, port: int):
+    """Serve the dashboard at http://host:port."""
+    init_db()
+    from agentic_autoresearch.obs.app import serve
+
+    click.echo(f"dashboard: http://{host}:{port}")
+    serve(host=host, port=port)
+
+
+@cli.command()
+def status():
+    """One-shot status dump (for terminals without a browser)."""
+    init_db()
+    click.echo(f"home: {home()}")
+    click.echo(f"db:   {db_path()}")
+    runs = store.latest_run()
+    if runs:
+        click.echo(f"latest run: {runs['problem_name']} ({runs['status']}) {runs['started_at']}")
+    alive = store.alive_processes("orchestrator")
+    if alive:
+        for r in alive:
+            click.echo(f"orchestrator alive pid={r['pid']} hb={r['last_heartbeat_at']}")
+    else:
+        click.echo("orchestrator: not running")
+
+
+def _start_dashboard_thread():
+    from agentic_autoresearch.obs.app import serve
+
+    t = threading.Thread(target=lambda: serve(), daemon=True)
+    t.start()
+    time.sleep(0.3)
+    click.echo("dashboard: http://127.0.0.1:8765")

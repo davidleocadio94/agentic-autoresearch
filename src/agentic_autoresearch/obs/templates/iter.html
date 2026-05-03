@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+  .stat { background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 0.8rem 1rem; }
+  .stat-label { font-size: 0.75rem; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-value { font-size: 1.4rem; font-weight: 600; margin-top: 0.2rem; }
+  .stat-value.up { color: #047857; }
+  .stat-value.down { color: #b91c1c; }
+  .stat-value.flat { color: #6b7280; }
+  .arrow { color: #9ca3af; margin: 0 0.4rem; font-weight: 400; font-size: 1rem; }
+  .nav-iters { display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; font-size: 0.9rem; }
+  .nav-iters a { padding: 0.3rem 0.7rem; border: 1px solid #ddd; border-radius: 6px; text-decoration: none; color: #444; }
+  .nav-iters a:hover { background: #f3f4f6; }
+  .section h2 { margin-bottom: 0.4rem; font-size: 1.05rem; }
+  .section p { margin-top: 0; line-height: 1.5; }
+  .fixture-row td:nth-child(2) { width: 120px; }
+  .bar { display: inline-block; height: 10px; background: #eee; border-radius: 4px; width: 100px; vertical-align: middle; position: relative; }
+  .bar-fill { display: block; height: 100%; border-radius: 4px; background: #059669; }
+  .bar-fill.zero { background: #dc2626; }
+  .bar-fill.partial { background: #f59e0b; }
+  .files-list { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
+  .files-list li { margin-bottom: 0.2rem; }
+  .log-toggle { cursor: pointer; color: #06c; font-size: 0.85rem; }
+  .log-pane { background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 0.8rem; font-family: ui-monospace, Menlo, monospace; font-size: 0.75rem; line-height: 1.4; max-height: 400px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .pill-phase { background: #dbeafe; color: #1e40af; }
+  .meta-row { font-size: 0.85rem; color: #666; margin-bottom: 0.5rem; }
+  .meta-row span { margin-right: 1.2rem; }
+</style>
+
+<div class="nav-iters">
+  <a href="/run/{{ it.run_id }}">← back to run</a>
+  {% if prev_it %}<a href="/iter/{{ prev_it.id }}">← iter {{ it.iter_num - 1 }}</a>{% endif %}
+  <strong>iter {{ it.iter_num }}</strong>
+  {% if next_it %}<a href="/iter/{{ next_it.id }}">iter {{ it.iter_num + 1 }} →</a>{% endif %}
+</div>
+
+<h1 style="margin-bottom: 0.3rem">
+  iter {{ it.iter_num }}
+  {% if it.category %}<span class="pill" style="background:#e0e7ff;color:#3730a3">{{ it.category }}</span>{% endif %}
+  {% if it.kept == 1 %}<span class="pill pill-kept">KEPT</span>
+  {% elif it.kept == 0 %}<span class="pill pill-reverted">REVERTED</span>
+  {% else %}<span class="pill" style="background:#fef3c7;color:#92400e">{{ it.phase }}</span>{% endif %}
+</h1>
+<div class="meta-row">
+  <span>run: <a href="/run/{{ it.run_id }}">{{ run.problem_name if run else it.run_id[:8] }}</a></span>
+  <span>started: <span class="mono">{{ it.started_at }}</span></span>
+  <span>duration: {{ it.duration_seconds or 0 }}s</span>
+  {% if it.commit_hash %}<span>commit: <span class="mono">{{ it.commit_hash[:8] }}</span></span>{% endif %}
+</div>
+
+<!-- TOP: 3 stats at a glance -->
+<div class="grid-3" style="margin-bottom: 1.2rem">
+  <div class="stat">
+    <div class="stat-label">score</div>
+    <div class="stat-value">
+      {{ "%.4f"|format(it.score_before) }}
+      <span class="arrow">→</span>
+      {% if it.score_after is not none %}
+        {% set delta = it.score_after - it.score_before %}
+        <span class="{% if delta > 0 %}up{% elif delta < 0 %}down{% else %}flat{% endif %}">
+          {{ "%.4f"|format(it.score_after) }}
+        </span>
+      {% else %}
+        <span class="flat">—</span>
+      {% endif %}
+    </div>
+    {% if it.score_after is not none %}
+      {% set delta = it.score_after - it.score_before %}
+      <div style="font-size: 0.85rem; margin-top: 0.3rem"
+           class="{% if delta > 0 %}up{% elif delta < 0 %}down{% else %}flat{% endif %}">
+        Δ {{ "%+.4f"|format(delta) }}
+      </div>
+    {% endif %}
+  </div>
+  <div class="stat">
+    <div class="stat-label">fixtures passed</div>
+    <div class="stat-value">
+      {% set passed = per_fixture | selectattr(1, 'equalto', 1.0) | list | length %}
+      {{ passed }} / {{ per_fixture | length }}
+    </div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">decision</div>
+    <div class="stat-value">
+      {% if it.kept == 1 %}<span class="up">✓ kept</span>
+      {% elif it.kept == 0 %}<span class="down">✗ reverted</span>
+      {% else %}<span class="flat">{{ it.phase }}</span>{% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- HYPOTHESIS (PLAN phase) -->
+<div class="card section">
+  <h2>① Hypothesis (PLAN)</h2>
+  <p>{{ it.hypothesis or "(no hypothesis recorded)" }}</p>
+  {% if files_touched %}
+  <details style="margin-top: 0.5rem">
+    <summary style="cursor: pointer; font-size: 0.85rem; color: #666">files to touch ({{ files_touched|length }})</summary>
+    <ul class="files-list">
+      {% for f in files_touched %}<li>{{ f }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+
+<!-- ACT — per-fixture results -->
+<div class="card section">
+  <h2>② Eval results (ACT)</h2>
+  {% if per_fixture %}
+  <table>
+    <thead><tr><th>fixture</th><th>score</th><th></th></tr></thead>
+    <tbody>
+      {% for name, s in per_fixture %}
+      <tr class="fixture-row">
+        <td class="mono">{{ name }}</td>
+        <td>{{ "%.3f"|format(s) }}</td>
+        <td>
+          <span class="bar"><span class="bar-fill {% if s == 0 %}zero{% elif s < 1 %}partial{% endif %}"
+                                  style="width: {{ (s * 100)|round(0) }}%"></span></span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color: #888">(no per-fixture data — eval may have failed)</p>
+  {% endif %}
+</div>
+
+<!-- REFLECT — lesson + next -->
+<div class="card section">
+  <h2>③ Lesson (REFLECT)</h2>
+  <p>{{ it.lesson or "(no lesson recorded)" }}</p>
+  {% if it.proposed_next %}
+  <h3 style="margin-top: 1rem; font-size: 0.95rem">→ Proposed next</h3>
+  <p>{{ it.proposed_next }}</p>
+  {% endif %}
+</div>
+
+<!-- ARTIFACTS — agent logs -->
+{% if artifacts %}
+<div class="card section">
+  <h2>Agent logs</h2>
+  <table>
+    <thead><tr><th>phase</th><th>size</th><th></th></tr></thead>
+    <tbody>
+      {% for a in artifacts %}
+      <tr>
+        <td>{{ a.kind }}</td>
+        <td class="mono">{{ "%.1f"|format((a.size_bytes or 0) / 1024) }} KB</td>
+        <td>
+          <span class="log-toggle"
+                hx-get="/artifact/{{ a.id }}/preview"
+                hx-target="#log-{{ loop.index }}"
+                hx-swap="innerHTML"
+                onclick="document.getElementById('log-{{ loop.index }}').style.display='block'">
+            view tail
+          </span>
+        </td>
+      </tr>
+      <tr><td colspan="3">
+        <div id="log-{{ loop.index }}" class="log-pane" style="display:none"></div>
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<script>
+// htmx auto-extracts JSON {text:...} into the target if response is JSON.
+// Workaround: we read .text via a small adapter.
+document.body.addEventListener('htmx:afterRequest', function(e) {
+  const target = e.detail.target;
+  if (!target || !target.classList.contains('log-pane')) return;
+  try {
+    const data = JSON.parse(e.detail.xhr.responseText);
+    target.textContent = data.text || "(empty)";
+  } catch (err) {
+    // leave as-is
+  }
+});
+</script>
+{% endblock %}

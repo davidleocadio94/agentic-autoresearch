@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .db-layout { display: grid; grid-template-columns: 240px 1fr; gap: 1.5rem; }
+  .db-side { font-size: 0.9rem; }
+  .db-side h3 { margin: 1.2rem 0 0.5rem; font-size: 0.7rem; text-transform: uppercase; color: #6b7280; letter-spacing: 0.05em; }
+  .db-side a { display: flex; justify-content: space-between; padding: 0.4rem 0.6rem; border-radius: 6px; text-decoration: none; color: #374151; }
+  .db-side a:hover { background: #f3f4f6; }
+  .db-side a.active { background: #e0e7ff; color: #3730a3; font-weight: 600; }
+  .db-side .count { color: #9ca3af; font-size: 0.8rem; }
+  .db-side .preset { display: block; padding: 0.4rem 0.6rem; border-radius: 6px; text-decoration: none; color: #444; margin-bottom: 0.2rem; border: 1px solid #eee; font-size: 0.85rem; }
+  .db-side .preset:hover { background: #f9fafb; border-color: #ddd; }
+  .db-side .preset.active { background: #fef3c7; border-color: #f59e0b; color: #92400e; }
+  .db-side .preset .desc { font-size: 0.7rem; color: #888; margin-top: 0.2rem; }
+  .db-main h1 { font-size: 1.3rem; margin-bottom: 0.3rem; }
+  .db-main .toolbar { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 1rem; }
+  .db-main .toolbar input { padding: 0.4rem 0.7rem; border: 1px solid #ddd; border-radius: 6px; flex: 1; font-size: 0.9rem; }
+  .db-main .toolbar button { padding: 0.4rem 0.9rem; border: 1px solid #06c; background: #06c; color: white; border-radius: 6px; cursor: pointer; }
+  .db-main .filter-pill { background: #fef3c7; color: #92400e; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.8rem; margin-left: 0.5rem; }
+  .db-main .clear-link { color: #6b7280; font-size: 0.8rem; margin-left: 0.5rem; text-decoration: none; }
+  .db-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .db-table th { background: #fafafa; padding: 0.5rem 0.7rem; border-bottom: 1px solid #e5e7eb; text-align: left; font-weight: 600; color: #374151; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+  .db-table td { padding: 0.5rem 0.7rem; border-bottom: 1px solid #f3f4f6; vertical-align: top; max-width: 320px; word-break: break-word; }
+  .db-table tr:hover { background: #fafafa; }
+  .db-table .cell-id { font-family: ui-monospace, Menlo, monospace; font-size: 0.75rem; color: #6b7280; }
+  .db-table .cell-id a { color: #06c; }
+  .db-table .cell-num { text-align: right; font-variant-numeric: tabular-nums; }
+  .db-table .cell-bool-yes { color: #047857; font-weight: 600; }
+  .db-table .cell-bool-no { color: #b91c1c; font-weight: 600; }
+  .db-table .cell-null { color: #9ca3af; font-style: italic; }
+  .db-table .cell-json { font-family: ui-monospace, Menlo, monospace; font-size: 0.72rem; background: #f9fafb; padding: 0.3rem 0.5rem; border-radius: 4px; white-space: pre-wrap; max-height: 120px; overflow: auto; }
+  .db-table .cell-text { line-height: 1.4; }
+  .db-table .cell-trunc { cursor: pointer; }
+  .db-table .cell-trunc:hover::after { content: ""; }
+  .pill-phase-kept { background:#d1fae5; color:#065f46; }
+  .pill-phase-reverted { background:#fee2e2; color:#991b1b; }
+  .pill-phase-acting, .pill-phase-planning, .pill-phase-reflecting, .pill-phase-pending { background:#dbeafe; color:#1e40af; }
+  .err-banner { background: #fee2e2; border: 1px solid #fca5a5; color: #991b1b; padding: 0.6rem; border-radius: 6px; margin-bottom: 1rem; font-family: monospace; }
+  .empty { color: #9ca3af; padding: 2rem; text-align: center; border: 1px dashed #ddd; border-radius: 8px; }
+  .sql-preview { background: #1e293b; color: #cbd5e1; padding: 0.5rem 0.7rem; border-radius: 4px; font-family: monospace; font-size: 0.7rem; margin-bottom: 1rem; overflow-x: auto; }
+  .sql-preview .kw { color: #93c5fd; }
+</style>
+
+<div class="db-layout">
+  <aside class="db-side">
+    <h3>Tables</h3>
+    {% for t in tables %}
+      <a href="/db?table={{ t }}" class="{{ 'active' if t == table else '' }}">
+        <span>{{ t }}</span>
+        <span class="count">{{ stats[t] }}</span>
+      </a>
+    {% endfor %}
+
+    {% if presets %}
+    <h3>Common queries</h3>
+    {% for p in presets %}
+      <a href="/db?table={{ table }}&preset={{ p.key }}" class="preset {{ 'active' if p.key == preset else '' }}">
+        <strong>{{ p.label }}</strong>
+        <div class="desc">{{ p.desc }}</div>
+      </a>
+    {% endfor %}
+    {% endif %}
+
+    <h3>Tips</h3>
+    <div style="font-size: 0.75rem; color: #666; line-height: 1.5">
+      • click any <code>iterations.id</code> to open its detail page<br>
+      • click any <code>runs.id</code> to open the run page<br>
+      • search hits all text columns
+    </div>
+  </aside>
+
+  <main class="db-main">
+    <h1>
+      {{ table }}
+      {% if preset_label %}<span class="filter-pill">{{ preset_label }}</span>
+        <a href="/db?table={{ table }}" class="clear-link">clear</a>{% endif %}
+    </h1>
+    <div style="color:#6b7280; font-size:0.85rem; margin-bottom: 1rem">
+      showing {{ rows|length }} of {{ stats[table] }} row{{ '' if stats[table] == 1 else 's' }}
+    </div>
+
+    <form method="get" action="/db" class="toolbar">
+      <input type="hidden" name="table" value="{{ table }}">
+      {% if preset %}<input type="hidden" name="preset" value="{{ preset }}">{% endif %}
+      <input name="q" value="{{ q }}" placeholder="search text columns…">
+      <button>search</button>
+    </form>
+
+    <details style="margin-bottom: 1rem">
+      <summary style="cursor:pointer; font-size:0.8rem; color:#6b7280">show SQL</summary>
+      <div class="sql-preview">{{ sql }}</div>
+    </details>
+
+    {% if err %}
+      <div class="err-banner">{{ err }}</div>
+    {% endif %}
+
+    {% if rows %}
+      <table class="db-table">
+        <thead>
+          <tr>{% for c in cols %}<th>{{ c }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            {% for c in cols %}
+              <td>{{ format_cell(table, c, r[c]) | safe }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="empty">no rows match</div>
+    {% endif %}
+  </main>
+</div>
+{% endblock %}
