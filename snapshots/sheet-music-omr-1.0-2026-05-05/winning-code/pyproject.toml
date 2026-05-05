@@ -1,0 +1,22 @@
+[project]
+name = "sheet-music-omr"
+version = "0.0.1"
+description = "PDF → MusicXML via Gemini Vision. Driven by agentic-autoresearch."
+requires-python = ">=3.11"
+dependencies = [
+    "verovio>=4.3",
+    "cairosvg>=2.7",
+    "music21>=9.1",
+    "pymupdf>=1.24",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "google-genai>=1.0",
+    "python-dotenv>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sheet_music_omr"]

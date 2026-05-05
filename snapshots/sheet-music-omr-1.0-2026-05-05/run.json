@@ -1,0 +1,16 @@
+{
+  "id": "d3f0461b-69c8-49d3-b471-744c52adadf2",
+  "problem_name": "sheet-music-omr",
+  "problem_path": "/Users/davidvillarreal/Documents/sheet-music-omr",
+  "started_at": "2026-05-03T22:40:19+00:00",
+  "ended_at": "2026-05-05T16:09:13+00:00",
+  "status": "done",
+  "exit_reason": "target_reached",
+  "final_score": 1.0,
+  "total_cost_usd": 172.952913,
+  "gemini_cost_usd": 25.422918,
+  "claude_cost_usd": 147.529995,
+  "best_score_so_far": 1.0,
+  "best_commit": "047564c92572026eb593daf19c98e8c93daac46b",
+  "plateau_count": 0
+}
