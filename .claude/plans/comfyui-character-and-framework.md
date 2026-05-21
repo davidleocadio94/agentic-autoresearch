@@ -12,9 +12,11 @@
 
 Produce a saved ComfyUI configuration (workflow JSON + parameter dict) that
 generates a photorealistic AI character with face-consistency across diverse
-contexts, reaching mean score **≥ 4.95 / 5** on the existing 7-dimension
-rubric, with `face_consistency ≥ 4.85` and replicate std **≤ 0.05**, within
-**30 pod-hours and a hard $50 judge-cost cap**.
+contexts, reaching **mean composite ≥ 8.5 / 10** on an ensemble eval
+(ArcFace + DINOv2 + CLIP + anatomy + narrowed Opus rubric, joined by
+gates), with **arcface_mean ≥ 0.75**, **composite std ≤ 0.4** across
+15 candidates, and **≤ 1 gate failure of 15**, within **30 pod-hours
+and a hard $50 judge-cost cap**.
 
 Equally important secondary goal: by the end of the run, the per-project
 world-model DB contains a queryable structure of beliefs, thoughts,
@@ -46,8 +48,11 @@ ADDITION                         SHAPE OF CHANGE
 3. World-model schema            beliefs / thoughts / understandings /
                                  intuitions / configurations tables,
                                  not a flat lessons list
-4. Claude-Opus-4.7 vision judge  replaces Gemini; held-out refs +
-                                 fresh judge session per call
+4. Ensemble eval                 ArcFace + DINOv2 + CLIP + anatomy +
+   (objective + narrowed LLM)    narrowed Opus rubric, joined by gates.
+                                 Opus is 25% of weight, not 100%.
+                                 Eval runs on the pod; only the winner
+                                 image + scores vector return to the Mac.
 5. Global credentials store      ~/.agentic-autoresearch/credentials.toml
                                  chmod 600, never in spec.md, never git-
                                  committed, never logged
@@ -84,10 +89,15 @@ Hard rules:
   projects/                 # per-project state, per-problem isolation
     omr/
       db.sqlite             # existing OMR memory (left alone)
-      artifacts/
+      iters/
     comfyui-character/
       db.sqlite             # NEW — fresh world model for this problem
-      artifacts/            # pulled images, workflow JSONs, judge outputs
+      iters/                # ONLY winner + scores per iter — see below
+        iter_001/
+          winner.webp       # ~150KB, the best of k=3 seeds
+          scores.json       # 2KB, full rubric output incl. losing seeds' scores
+          workflow.json     # the config that produced the winner
+        iter_NNN/...
       pods/                 # active pod manifests (handle, started_at,
                             # last_seen, cumulative_seconds)
   logs/
@@ -265,13 +275,13 @@ that learns."
                                             ▼ orchestrator polls
                                             ▼ every 5 min via RunPod API
                                        ┌──────────┐
-                                       │ POLLING  │
-                                       └────┬─────┘
-                                            ▼ results landed
+                                       │ POLLING  │ judge ran ON THE POD,
+                                       └────┬─────┘ scored 15 in place
+                                            ▼ winner + scores.json ready
                                        ┌──────────┐
-                                       │ SCORING  │ fresh claude -p vision
-                                       └────┬─────┘ judge call (Opus 4.7)
-                                            ▼
+                                       │DOWNLOAD  │ pull JUST the winner
+                                       └────┬─────┘ (~150KB) + scores.json
+                                            ▼      (~2KB). nothing else.
                                        ┌──────────┐
                                        │REFLECTING│ fresh claude -p
                                        └────┬─────┘ updates world model
@@ -282,37 +292,226 @@ that learns."
 ```
 
 Key property: a 4-hour pod batch consumes ~0 Claude-session minutes
-between submit and results. Three `claude -p` calls happen (actor for
-submit, judge for scoring, reflector for world-model update), each
-short. The orchestrator (a single long-lived Python process) owns the
-polling and state transitions.
+between submit and results, and ~150KB of Mac disk per iter. The judge
+runs **on the pod** (where the 15 candidate images already live) — no
+30MB round-trip just so a remote Claude can score images that were
+generated on the pod in the first place. Three `claude -p` calls happen
+per iter (actor for submit, judge on the pod for scoring, reflector for
+world-model update), each short. The orchestrator (a single long-lived
+Python process on the Mac) owns the polling and state transitions and
+only ever sees the winner image.
 
 ---
 
-## Vision judge: Opus 4.7, not Gemini
+## The eval: ensemble of objective metrics + narrowed Opus judge, joined by gates
+
+A single LLM judge with a single weighted rubric is too gameable, especially
+when the planner, actor, and judge are all Claude. The eval is therefore an
+**ensemble of independent signals** — most of them objective (numerical,
+model-based, no LLM) — joined by **hard gates** on deal-breakers and a
+**weighted composite** on what survives the gates.
+
+The whole eval runs on the pod, against the 15 candidate images ComfyUI
+rendered to local disk. Only the winner + the scores vector come back to
+the Mac.
+
+### The five signals (first-run scope)
 
 ```
-JUDGE CALL SHAPE
-────────────────
-input:
-  - rubric (7 dimensions, weights, scoring guide — pinned per run)
-  - 3 visible Brooke refs (planner & reflector see these)
-  - 2 held-out Brooke refs (judge sees, planner never does)
-  - 1 identity reference (the face to match)
-  - k=3 candidate images for this prompt × 5 prompts = 15 candidates
-output:
-  - per-image scores across 7 dimensions
-  - per-image final_score
-  - mean + std per dimension across k seeds
-  - drift_check: re-score 2 fixed historical samples every 5 iters;
-    if absolute drift > 0.3, pause for recalibration
+SIGNAL                          OBJECTIVE?   WHAT IT CATCHES
+──────                          ──────────   ───────────────
 
-isolation:
-  - fresh claude -p, no system prompt referencing the project,
-    no memory access, no planner context — just rubric + images
-  - this is the framework's anti-Goodhart guard. NOT bulletproof
-    (planner/actor/judge are same model family); it's harm reduction.
+1. ArcFace cosine               ✓            Identity match. The face
+   distance vs identity.png                  consistency anchor. Hard
+   (insightface, on the pod)                 to game without actually
+                                             matching the identity.
+
+2. DINOv2 patch similarity      ✓            Texture-level similarity
+   to nearest Brooke ref                     to the aesthetic. Catches
+                                             "looks Brooke-ish but skin
+                                             wrong" — texture / pore
+                                             realism by proxy.
+
+3. CLIP image-image             ✓            Coarse aesthetic similarity
+   similarity vs the 3                       to Brooke refs. Cheap,
+   visible Brooke refs                       robust, low-resolution.
+
+4. Anatomy sanity check         ✓            Finger count, eye keypoint
+   (MediaPipe + heuristics)                  symmetry, no melted hands.
+                                             A hard fail signal: an
+                                             image with 7 fingers is
+                                             never acceptable regardless
+                                             of how pretty the face is.
+
+5. Opus 4.7 narrowed rubric     ✗            What metrics can't catch:
+   (the only LLM call,                       lighting coherence, scene
+   on the pod, no                            plausibility, candid feel,
+   project context)                          micro-expression realism.
+                                             ~20% of the weight, not 100%.
 ```
+
+Deliberately skipped for first run, on the future-work list:
+SkinTextureNet (needs a labeled dataset), AI-detector classifier (arms
+race, unstable), EXIF/JPEG-cycle realism (~200 LOC, marginal signal).
+
+### Gates — hard rejection before any weighting
+
+```
+GATE                          THRESHOLD     WHY IT'S A GATE
+────                          ─────────     ───────────────
+arcface_cosine                ≥ 0.55        wrong person = useless
+                                            regardless of beauty
+anatomy_sanity                ≥ 0.90        melted hand = unshippable
+ai_detector_confidence        ≤ 0.80        (future: when added)
+                                            obvious AI = unshippable
+```
+
+Without gates, the loop optimizes weighted sums and produces
+"beautiful pictures of the wrong person" or "beautiful pictures with
+seven fingers." Gates fail fast on deal-breakers, then the weighted
+composite tunes the niceties.
+
+### Composite score — on what survives the gates
+
+```
+score_0_to_10 = 10 × (
+    0.40 × arcface_normalized        # in [0, 1], (cos - 0.55) / 0.45
+  + 0.25 × opus_rubric_0_to_1        # the LLM dimension, narrowed
+  + 0.20 × dinov2_patch_mean         # already in [0, 1]
+  + 0.15 × clip_image_mean           # already in [0, 1]
+)
+```
+
+The Opus judge's NARROWED rubric (4 dimensions, equal weight,
+internal avg):
+
+```
+1. lighting_coherence       1–10   shadows physically consistent,
+                                   light direction matches scene
+2. scene_plausibility       1–10   environment feels real, not stock
+3. candid_authenticity      1–10   "candid phone photo" not "studio"
+4. micro_expression         1–10   subtle muscle activation, real
+                                   expression rather than mannequin
+```
+
+That's it for the LLM. No more "judge the whole image" — it scores
+only what metrics can't reach.
+
+### What flows where
+
+```
+POD                                           MAC
+───                                           ───
+/tmp/iter_NNN/{15 candidates}                 (nothing yet)
+   │
+   ▼
+eval/ pipeline (on the pod):
+  ─ arcface.py        → per-image cosine to identity.png
+  ─ dinov2.py         → per-image patch similarity to Brooke refs
+  ─ clip_sim.py       → per-image CLIP similarity to Brooke refs
+  ─ anatomy.py        → per-image sanity score (MediaPipe)
+  ─ opus_rubric.py    → ONE Anthropic call per image, narrowed rubric
+                         (rubric.md pinned + checksummed per run)
+  ─ compose.py        → applies gates, then weighted composite
+                         emits scores.json (the full vector)
+                         picks winner = highest composite score
+                         among gate-passers
+   │
+   │ POSTs to orchestrator:                ┌─▶ ~/.aar/projects/<p>/
+   ▼                                       │    iters/iter_NNN/
+winner.webp     (~150 KB) ─────────────────┤      winner.webp
+scores.json     (~3 KB)   ─────────────────┤      scores.json
+workflow.json   (the config used)  ────────┘      workflow.json
+                                                  per iter on Mac: ~150 KB
+/tmp/iter_NNN/ deleted
+```
+
+### scores.json shape (richer than before)
+
+```json
+{
+  "composite": 8.7,
+  "winner_index": 11,
+  "per_image": [
+    {
+      "seed": 101, "prompt_idx": 0,
+      "arcface": 0.78, "dinov2": 0.71, "clip": 0.66,
+      "anatomy": 0.98, "opus_rubric": 0.81,
+      "composite": 8.5,
+      "gates_passed": ["arcface", "anatomy"],
+      "gates_failed": []
+    },
+    "... 14 more ..."
+  ],
+  "per_signal": {
+    "arcface":     {"mean": 0.75, "std": 0.04, "min": 0.61, "max": 0.84},
+    "dinov2":      {"mean": 0.69, "std": 0.05, "min": 0.58, "max": 0.78},
+    "clip":        {"mean": 0.64, "std": 0.06, "min": 0.50, "max": 0.74},
+    "anatomy":     {"mean": 0.96, "std": 0.03, "min": 0.88, "max": 1.00},
+    "opus_rubric": {"mean": 0.78, "std": 0.07, "min": 0.62, "max": 0.92},
+    "composite":   {"mean": 8.3, "std": 0.4, "min": 7.1, "max": 8.7}
+  },
+  "gate_failures": {
+    "arcface": 1,    // one seed missed the identity gate
+    "anatomy": 0,
+    "ai_detector": 0
+  },
+  "drift_check": {
+    "anchor_1_composite": 7.9,  // historical: 7.8 → drift +0.1 (ok)
+    "anchor_2_composite": 8.4,  // historical: 8.5 → drift -0.1 (ok)
+    "anchor_threshold": 0.3
+  },
+  "rubric_checksum": "sha256:abc...",  // pin verification
+  "metadata": {
+    "judge_model": "claude-opus-4-7",
+    "arcface_model": "buffalo_l",
+    "dinov2_model": "dinov2_vitb14",
+    "clip_model": "ViT-L-14/openai",
+    "anatomy_model": "mediapipe_face_v0.10"
+  }
+}
+```
+
+This vector is what the reflector sees. It can now write beliefs like
+"configs with high CLIP but low DINOv2 score high on opus_rubric but
+fail the texture eye-test" — that's structurally richer than "score
+went up 0.02."
+
+### Targets, in this scoring scheme
+
+```
+TARGET                              CURRENT BEST (estimated re-scored)
+──────                              ─────────────────────────────────
+mean composite        ≥ 8.5/10      ~7.8 (your 4.94/5 → ~7.8/10 in
+                                     the new scheme, give or take)
+arcface_mean          ≥ 0.75        ~0.68 (FC was your bottleneck)
+std (composite)       ≤ 0.4
+gate_failures total   ≤ 1 of 15     (one bad seed allowed; two means
+                                     the config is unreliable)
+```
+
+### Goodhart layers, all enforced
+
+```
+LAYER                                 HOW
+─────                                 ───
+rubric pinned                         rubric.md sha256 checksummed at run
+                                       start; judge gets the checksum and
+                                       refuses to score if mismatched
+gates that bypass weighting           you can't rhetorically game ArcFace —
+                                       it's a face-embedding distance
+held-out anchor re-score              every 5 iters, two fixed images
+                                       re-scored; |Δcomposite| > 0.3 pauses
+no single signal > 40% weight         no one component can dominate
+opus judge has no project context     fresh process, only rubric + images
+opus judge is only 25% of weight      LLM gaming has limited blast radius
+```
+
+### Opt-out for debugging
+
+`autoresearch run <p> --keep-all-candidates` streams every candidate
+back to the Mac for that run. **Default off.** Only enable when
+inspecting why a config produced a specific bad output.
 
 ---
 
@@ -346,10 +545,17 @@ problems/comfyui-character/
   spec.md                   # problem statement, eval, budget, kill
                             # conditions, requires_credentials
   eval/
-    score.py                # wraps existing score_pro_gap.py logic but
-                            # using Opus-4.7 vision judge, reads
-                            # --config + --seeds, returns
-                            # {score, replicates, per_seed, per_dim}
+    rubric.md               # the Opus-judged dimensions, checksummed.
+                            # only the 4 narrowed dimensions (lighting,
+                            # scene, candid_authenticity, micro_expression)
+    arcface.py              # insightface buffalo_l, cosine vs identity.png
+    dinov2.py               # patch similarity vs Brooke refs
+    clip_sim.py             # CLIP image-image similarity
+    anatomy.py              # MediaPipe hand/finger/eye sanity
+    opus_rubric.py          # the LLM call: rubric.md + images → 4 scores
+    compose.py              # gates + weighted composite → scores.json
+                            # this is the entrypoint the framework calls
+                            # ($EVAL_ENTRYPOINT in spec.md)
     prompts.json            # 5 fixed evaluation prompts (night street,
                             # indoor cozy, outdoor daylight, full-body
                             # action, close-up)
@@ -387,15 +593,19 @@ name: comfyui-character
 requires_credentials: [runpod, anthropic, huggingface]
 budget:
   pod_hours: 30
-  judge_dollars: 50
+  judge_dollars: 50          # anthropic spend on Opus 4.7 (the LLM
+                             # component of the eval) + planner/actor/
+                             # reflector together
 target:
-  mean_score: 4.95
-  face_consistency: 4.85
-  max_std: 0.05
+  mean_composite: 8.5        # on [0, 10]
+  arcface_mean: 0.75         # the FC anchor, above its 0.55 gate
+  max_std: 0.4               # std across the 15 per-image composites
+  max_gate_failures: 1       # of 15 candidates per iter
 kill_conditions:
   - budget_exhausted
   - no_improvement_over_2_sigma_for: 5  # iterations
-  - judge_drift_absolute: 0.3           # on held-out anchors
+  - drift_absolute: 0.3                  # composite drift on held-out
+                                          # anchors, re-scored every 5 iters
 replicates_per_config: 3                # seeds
 forced_first_iterations:
   - mickmumpitz-ccc-3.8
@@ -610,42 +820,74 @@ thoughts. Budget kill-condition is a strict cap, not a target.
 
 ## Implementation order (smallest first, each independently testable)
 
+### Framework work (problem-agnostic, future problems inherit)
+
 1. **Credentials store + CLI verb.** `autoresearch credentials add <svc>`.
    Touches nothing else. Verifiable by `autoresearch credentials list`.
 2. **Per-project DB namespacing.** Move `~/.aar/db.sqlite` →
    `~/.aar/projects/omr/db.sqlite`. Existing OMR self-test must still
-   pass. This is the migration gate — no other framework work merges until it
-   does.
+   pass. This is the migration gate — no other framework work merges
+   until it does.
 3. **World-model schema.** Add the five tables (beliefs / thoughts /
    understandings / intuitions / configurations) to the per-project DB.
    Backfill OMR's existing lessons as `beliefs` with `confidence=0.7,
    evidence_iters=[iter#]` so the schema starts populated.
-4. **Opus-4.7 vision judge.** New `agents/judge.py`. Drop-in replacement
-   for any eval that wants vision scoring. Test on a held-out set of
-   already-scored comfyui images; verify score correlation with the old
-   Gemini judge before trusting it (one-time calibration run).
-5. **Non-blocking ACT + RunPod lifecycle.** State machine, polling,
-   pod-leak guards. Self-test with a fake "remote" that's actually a
-   local sleep — verify the state machine works before pointing it at
-   real GPUs.
-6. **Comfyui-character problem scaffold.** spec.md, eval/, references/,
-   the runner. Forced first 3 iterations on the validated stacks.
-7. **First end-to-end run.** Budget 30 pod-hours, $50 cap. Walk away.
+4. **MCP server for world-model writes.** Tools the reflector calls:
+   `add_belief`, `confirm_thought`, `refute_thought`, `add_understanding`,
+   `add_intuition`, `save_configuration`. Embeddings computed server-side.
+5. **Non-blocking ACT + RunPod lifecycle.** State machine
+   (`awaiting_remote` / `polling`), pod-leak guards, headless start/stop.
+   Self-test with a fake remote (local sleep) before pointing at real
+   GPUs.
+6. **Ingest layer (first cut).** `sources.yaml` schema + fetchers for
+   reddit JSON, arxiv, and curated web domains. Writes
+   `status='external_claim'` beliefs with `confidence=0.3`. Skip X
+   scraping in the first cut.
 
-Steps 1–5 are framework work — they're the things any future problem
-will inherit. Step 6 is the comfyui-specific scaffold. Step 7 is the
-test of whether the framework now generalizes beyond OMR.
+### Comfyui-specific work
+
+7. **Ensemble eval modules.** Six small files in
+   `problems/comfyui-character/eval/`:
+   - `arcface.py` — insightface buffalo_l (already on the volume)
+   - `dinov2.py` — facebookresearch DINOv2 ViT-B/14
+   - `clip_sim.py` — open_clip ViT-L/14
+   - `anatomy.py` — MediaPipe + hand/eye heuristics
+   - `opus_rubric.py` — single Anthropic call per image, narrowed rubric
+   - `compose.py` — gates + weighted composite → scores.json (entrypoint)
+
+   Each module is independently unit-testable on a tiny fixture set
+   (10 already-scored historical comfyui images). Calibration step:
+   verify the composite correlates positively with your historical
+   Gemini scores on those fixtures before trusting it to drive a run.
+
+8. **Pod-side runtime (`judge.py` becomes `runtime.py`).**
+   Coordinates ComfyUI submission → image collection → eval pipeline
+   → POST results to orchestrator. Shipped to the pod on startup.
+
+9. **Comfyui-character problem scaffold.** spec.md, eval/rubric.md,
+   prompts.json, references/ (visible + held-out + identity),
+   workflows/ (3 validated 2026 stacks), `src/comfyui_character/runner.py`.
+   Forced first 3 iterations on the validated stacks.
+
+10. **First end-to-end run.** Budget 30 pod-hours, $50 cap. Walk away.
+
+Steps 1–6 are framework work — any future problem inherits them. Steps
+7–9 are the comfyui-specific scaffold. Step 10 is the test of whether
+the framework now generalizes beyond OMR.
 
 ---
 
 ## What "done" looks like
 
-For the run: a `configurations` row with mean ≥ 4.95, FC ≥ 4.85,
-std ≤ 0.05, fully reproducible from the saved workflow JSON + param
-dict. **Or** a refuted hypothesis from the world model explaining
-exactly which ceiling we hit and where the next investment should go.
+For the run: a `configurations` row with mean composite ≥ 8.5/10,
+arcface_mean ≥ 0.75, std ≤ 0.4, ≤1 gate failure across 15 candidates,
+fully reproducible from the saved workflow JSON + param dict. **Or** a
+refuted hypothesis from the world model explaining exactly which
+ceiling we hit and where the next investment should go.
 
-For the framework: five new abstractions, each demanded by a real run,
+For the framework: six new abstractions, each demanded by a real run,
 each scoped problem-agnostically. The next problem — whatever it is —
-inherits async-act, per-project memory, world model, vision judge, and
-headless credentials for free.
+inherits async-act, per-project memory, world model, MCP-driven world-
+model writes, ingest, and headless credentials for free. The eval is
+problem-specific by design (it's *the* problem-specific thing), but
+the contract (`compose.py` writes scores.json) is reusable.

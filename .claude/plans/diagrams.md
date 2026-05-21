@@ -75,9 +75,9 @@
 ║   │     │           │  ACTOR  │  claude -p, builds config + workflow │   ║
 ║   │     │           └─────────┘  submits to RunPod, exits            │   ║
 ║   │     │                                                            │   ║
-║   │     ├──spawn──▶ ┌─────────┐                                      │   ║
-║   │     │           │  JUDGE  │  claude -p (Opus 4.7), no project    │   ║
-║   │     │           └─────────┘  context, scores 15 images, exits    │   ║
+║   │     │           ┌─────────┐                                      │   ║
+║   │     │           │  JUDGE  │  Opus 4.7, runs ON THE POD,          │   ║
+║   │     │           └─────────┘  scores 15 in place, returns winner  │   ║
 ║   │     │                                                            │   ║
 ║   │     └──spawn──▶ ┌─────────┐                                      │   ║
 ║   │                 │REFLECTOR│  claude -p, updates world model      │   ║
@@ -117,9 +117,9 @@
 ║                                                   │ artifacts             ║
 ║                                                   ▼                       ║
 ╚═══════════════════════════════════════════════════╪═══════════════════════╝
-                                                    │ HTTPS pull
-                                                    ▼
-                          ~/.aar/projects/comfyui-character/artifacts/iter_NNN/
+                                                    │ HTTPS POST (~150KB)
+                                                    ▼   winner.webp + scores.json
+                          ~/.aar/projects/comfyui-character/iters/iter_NNN/
 ```
 
 ---
@@ -179,8 +179,9 @@ orchestrator advances it; agent subprocesses come and go.
                  │                       │  / failed / timeout  │
                  │                       └──────────┬───────────┘
                  │                                  │
-                 │                       results ready, downloaded
-                 │                       to artifacts/iter_NNN/
+                 │                       judge ran on pod; winner +
+                 │                       scores.json POSTed to Mac
+                 │                       (~150KB total per iter)
                  │                                  │
                  └──────────────────┬───────────────┘
                                     ▼
@@ -188,10 +189,12 @@ orchestrator advances it; agent subprocesses come and go.
                     │                              │
                     │         SCORING              │
                     │                              │
-                    │  fresh `claude -p` judge     │
-                    │  (Opus 4.7, no project ctx)  │
+                    │  Opus 4.7, runs ON THE POD   │
+                    │  no project ctx, no memory   │
                     │  rubric + refs + 15 images   │
-                    │  → per-image + mean + std    │
+                    │  scored in place. only the   │
+                    │  winner.webp + scores.json   │
+                    │  come back to the Mac        │
                     │                              │
                     └──────────────┬───────────────┘
                                    │
@@ -340,8 +343,8 @@ ITER 007  (parent: iter 003, the Mickmumpitz-CCC-3.8 baseline)
   │  writes thought.json:                             │
   │  {                                                │
   │    "category": "modify-current-best",             │
-  │    "rationale": "iter 003 had FC 4.91 std 0.04.  │
-  │      Belief #12 says PuLID id_weight > 0.9        │
+  │    "rationale": "iter 003 had arcface 0.75 std    │
+  │      0.04. Belief #12 says PuLID id_weight > 0.9  │
   │      stiffens expressions. Try 0.85 with shift    │
   │      raised to 3.2 to compensate.",               │
   │    "config_changes": {                            │
@@ -386,13 +389,8 @@ ITER 007  (parent: iter 003, the Mickmumpitz-CCC-3.8 baseline)
   ┌────────── ORCHESTRATOR POLLING (~75 min wall) ────┐
   │                                                   │
   │  every 5 min:                                     │
-  │    for prompt_id in pending_job.prompt_ids:       │
-  │      GET /history/<prompt_id>                     │
-  │    if all complete:                               │
-  │      download PNGs → artifacts/iter_007/          │
-  │      iter state → SCORING                         │
-  │    if any failed:                                 │
-  │      iter state → FAILED, record reason           │
+  │    GET /v1/jobs/<job_id> on the pod               │
+  │    states: rendering | judging | done | failed    │
   │                                                   │
   │  also runs every poll:                            │
   │    - pod-leak guard (kill if > budget × 1.5)      │
@@ -402,24 +400,53 @@ ITER 007  (parent: iter 003, the Mickmumpitz-CCC-3.8 baseline)
   │                                                   │
   └────────────────────────┬──────────────────────────┘
                            │
-  ┌──────────── JUDGE (claude -p Opus 4.7, ~90s) ─────┐
+  ┌────── JUDGE (Opus 4.7, runs ON THE POD, ~90s) ────┐
   │                                                   │
-  │  fresh subprocess, no project context, no memory  │
+  │  ensemble eval, runs on the pod.                  │
+  │  5 components, each independent.                  │
+  │  NO single LLM "judge" — Opus is only one signal. │
   │                                                   │
-  │  input:                                           │
-  │    rubric.md (7 dimensions)                       │
-  │    visible/brooke_{1,2,3}.png                     │
-  │    held_out/brooke_{4,5}.png                      │
-  │    identity.png                                   │
-  │    iter_007/*.png  (15 candidates)                │
+  │  inputs (all on pod local disk):                  │
+  │    rubric.md (narrowed, sha256 checksummed)       │
+  │    visible/brooke_{1,2,3}.png  (cached on volume) │
+  │    held_out/brooke_{4,5}.png   (cached on volume) │
+  │    identity.png                (cached on volume) │
+  │    /tmp/iter_007/*.png (15 candidates)            │
   │                                                   │
-  │  output: scores.json                              │
-  │    per-image × 7 dim scores                       │
-  │    per-dim mean + std across 15                   │
-  │    final_score (weighted) mean + std              │
+  │  for each of the 15 candidates:                   │
+  │    arcface.py    → cosine to identity.png         │
+  │    dinov2.py     → patch sim to nearest Brooke    │
+  │    clip_sim.py   → CLIP sim to visible Brookes    │
+  │    anatomy.py    → MediaPipe hand/eye sanity      │
+  │    opus_rubric.py → 1 Anthropic call, 4 narrowed  │
+  │                     dims (lighting, scene,        │
+  │                     candid, micro_expression)     │
   │                                                   │
-  │  writes:                                          │
-  │    artifacts/iter_007/scores.json                 │
+  │  compose.py applies:                              │
+  │    gates: arcface ≥ 0.55, anatomy ≥ 0.90          │
+  │    weighted composite on survivors                │
+  │    picks winner = max composite                   │
+  │                                                   │
+  │  output → POSTed back to Mac:                     │
+  │    scores.json:                                   │
+  │      per_image[15]: {arcface, dinov2, clip,       │
+  │                       anatomy, opus_rubric,       │
+  │                       composite, gates_passed}    │
+  │      per_signal: mean/std/min/max                 │
+  │      gate_failures: count per gate                │
+  │      drift_check: anchor re-scores                │
+  │      rubric_checksum                              │
+  │      winner_index                                 │
+  │    winner.webp  (~150 KB)                         │
+  │    workflow.json (the config used)                │
+  │                                                   │
+  │  Mac writes:                                      │
+  │    iters/iter_007/winner.webp                     │
+  │    iters/iter_007/scores.json                     │
+  │    iters/iter_007/workflow.json                   │
+  │    (≈ 150 KB total per iter on Mac)               │
+  │                                                   │
+  │  pod /tmp/iter_007/ wiped. losers gone forever.   │
   │                                                   │
   └────────────────────────┬──────────────────────────┘
                            │
@@ -427,26 +454,30 @@ ITER 007  (parent: iter 003, the Mickmumpitz-CCC-3.8 baseline)
   │                                                   │
   │  reads thought.json + scores.json + world model   │
   │                                                   │
-  │  outcome: mean 4.93 (Δ +0.02), FC 4.94 (Δ +0.03), │
-  │           std 0.038. Expected delta hit.          │
+  │  outcome: composite 8.74 (Δ +0.18),               │
+  │           arcface_mean 0.79 (Δ +0.04),            │
+  │           std 0.32, 0 gate failures.              │
+  │           Expected delta hit.                     │
   │                                                   │
-  │  world-model writes:                              │
-  │    - thought:N → status='confirmed'               │
-  │    - new belief: "PuLID id_weight 0.85 + shift   │
-  │       3.2 beats id_weight 0.92 + shift 2.01 on    │
-  │       FC without losing photorealism"             │
-  │       confidence: 0.65 (one iter, k=3 seeds)      │
-  │       evidence_iters: [7]                         │
-  │    - configurations row INSERT:                   │
-  │       name: "mickmumpitz-tuned-007"               │
-  │       parent: config:003                          │
-  │       sample_embedding: CLIP(best image)          │
-  │       best_score: 4.93, std: 0.038                │
+  │  world-model writes (via MCP tools):              │
+  │    confirm_thought(N)                             │
+  │    add_belief(                                    │
+  │      content="PuLID id_weight 0.85 + shift 3.2    │
+  │       beats 0.92/2.01: arcface +0.04 with no      │
+  │       loss on dinov2/anatomy",                    │
+  │      confidence=0.65,                             │
+  │      evidence_iters=[7])                          │
+  │    save_configuration(                            │
+  │      name="mickmumpitz-tuned-007",                │
+  │      parent="config:003",                         │
+  │      composite=8.74, std=0.32,                    │
+  │      arcface_mean=0.79,                           │
+  │      sample_path="iters/iter_007/winner.webp")    │
   │                                                   │
   │  costs ledger writes (this iter):                 │
   │    pod_seconds: 4523                              │
   │    pod_dollars: $2.08  (A40 @ $1.65/hr)           │
-  │    judge_dollars: $0.31                           │
+  │    judge_dollars: $0.31  (15 Opus calls)          │
   │    agent_tokens: 18,450 in / 2,890 out            │
   │    total_dollars: $2.55                           │
   │                                                   │
@@ -481,14 +512,14 @@ USER HOME (~)
 │   ├── projects/                         per-problem isolation
 │   │   ├── omr/
 │   │   │   ├── db.sqlite                 (migrated from old global db)
-│   │   │   └── artifacts/
+│   │   │   └── iters/
 │   │   ├── comfyui-character/
 │   │   │   ├── db.sqlite                 fresh world model
-│   │   │   ├── artifacts/
+│   │   │   ├── iters/                    ~150KB/iter — winner ONLY
 │   │   │   │   ├── iter_001/
-│   │   │   │   │   ├── workflow.json
-│   │   │   │   │   ├── images/*.png
-│   │   │   │   │   └── scores.json
+│   │   │   │   │   ├── winner.webp       ~150KB, best of 15 seeds
+│   │   │   │   │   ├── scores.json       includes losing seeds' scores
+│   │   │   │   │   └── workflow.json     the config that produced it
 │   │   │   │   └── iter_NNN/
 │   │   │   └── pods/
 │   │   │       └── active.json           live pod manifests
@@ -594,9 +625,10 @@ USER HOME (~)
                 ├────────────────────────────────────┤
                 │                                    │
                 │  1. TARGET REACHED                 │
-                │     mean ≥ 4.95                    │
-                │     AND FC ≥ 4.85                  │
-                │     AND std ≤ 0.05                 │
+                │     mean composite ≥ 8.5/10        │
+                │     AND arcface_mean ≥ 0.75        │
+                │     AND std ≤ 0.4                  │
+                │     AND ≤1 gate fail of 15         │
                 │     → exit "target_reached"        │
                 │                                    │
                 │  2. BUDGET EXHAUSTED               │
@@ -627,9 +659,10 @@ USER HOME (~)
 
 ## 9. Goodhart guards — the anti-self-gaming map
 
-The biggest risk: planner / actor / judge are all Claude. The judge can
-be implicitly optimized against. Five layered defenses, none sufficient
-alone:
+The biggest risk: planner / actor / Opus-judge are all Claude. The eval
+defense-in-depth has six layers, none sufficient alone. The most
+important is that the LLM judge is ONLY 25% of the composite score —
+the other 75% is objective metrics (ArcFace, DINOv2, CLIP, anatomy).
 
 ```
                   ATTACK SURFACE                  DEFENSE
@@ -665,6 +698,17 @@ alone:
        dimension                              start. judge gets the
                                               checksummed rubric, not
                                               one regenerated each call.
+
+   6.  agent finds a prompt style             ENSEMBLE EVAL: composite
+       that Opus-rubric loves but             score requires high
+       that ignores identity or               arcface AND high dinov2
+       has melted hands                       AND high clip AND high
+                                              anatomy. Opus is only
+                                              25% of weight; ArcFace
+                                              and anatomy are HARD
+                                              GATES — fail them, the
+                                              candidate is rejected
+                                              regardless of Opus.
 ```
 
 ---
@@ -679,15 +723,23 @@ alone:
 │  RUN  d3f0461b   started 2026-05-21 14:42   running    iter 7 / ?        │
 │                                                                          │
 │  ┌──────────────────────────────────┐   ┌────────────────────────────┐   │
-│  │  SCORE OVER TIME                 │   │  COST LEDGER               │   │
+│  │  COMPOSITE OVER TIME             │   │  COST LEDGER               │   │
 │  │                                  │   │                            │   │
-│  │   5 ┤                            │   │   pod-hours used: 6.2/30   │   │
-│  │   4 ┤            ▄▄ ▄▄  ▄        │   │   pod $:        $10.23     │   │
-│  │   3 ┤   ▄▄ ▄▄ ▄▄                 │   │   judge $:       $2.45/50  │   │
-│  │   2 ┤▄▄                          │   │   agent tok in:  142k      │   │
-│  │   1 ┤                            │   │   agent tok out: 22k       │   │
+│  │  10 ┤              ─ target 8.5  │   │   pod-hours used: 6.2/30   │   │
+│  │   8 ┤            ▄▄ ▄▄  ▄        │   │   pod $:        $10.23     │   │
+│  │   6 ┤   ▄▄ ▄▄ ▄▄                 │   │   judge $:       $2.45/50  │   │
+│  │   4 ┤▄▄                          │   │   agent tok in:  142k      │   │
+│  │   2 ┤                            │   │   agent tok out: 22k       │   │
 │  │     └──┬──┬──┬──┬──┬──┬──┬       │   │                            │   │
 │  │        1  2  3  4  5  6  7 iter  │   │  TOTAL: $13.41             │   │
+│  │                                  │   │                            │   │
+│  │  arcface (FC anchor):            │   │  GATES (this run)          │   │
+│  │   1.0┤            ▄▄ ▄▄  ▄       │   │   arcface fails: 2 of 105  │   │
+│  │   0.8┤   ▄▄ ▄▄ ▄▄                │   │   anatomy fails: 0 of 105  │   │
+│  │   0.6┤▄▄          ─ gate 0.55    │   │                            │   │
+│  │   0.4┤                           │   │                            │   │
+│  │      └──┬──┬──┬──┬──┬──┬──┬      │   │                            │   │
+│  │         1  2  3  4  5  6  7 iter │   │                            │   │
 │  └──────────────────────────────────┘   └────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐    │
@@ -695,7 +747,7 @@ alone:
 │  │  ──────────────                                                  │    │
 │  │  beliefs (active):  12      thoughts in flight:   1              │    │
 │  │  understandings:     3      intuitions:           2              │    │
-│  │  configurations:     4      best: mickmumpitz-tuned-007 (4.93)   │    │
+│  │  configurations:     4      best: mickmumpitz-tuned-007 (8.74)   │    │
 │  │                                                                  │    │
 │  │  TOP BELIEF (recency × confidence):                              │    │
 │  │  > "PuLID id_weight 0.85 + shift 3.2 beats 0.92/2.01 on FC"      │    │
@@ -729,9 +781,10 @@ T+1s    CLI loads credentials.toml, validates spec
 T+2s    orchestrator starts, opens per-project DB
 T+5s    iter 1 PLANNED (forced: mickmumpitz-ccc-3.8 baseline)
 T+30s   actor submits 15-image job to RunPod
-T+1h15m results downloaded → SCORING
-T+1h17m judge returns scores → REFLECTING
-T+1h18m reflector saves config "mickmumpitz-ccc-3.8" (score 4.88 ±0.04)
+T+1h15m judge ran on pod; winner.webp + scores.json POSTed (~150KB)
+T+1h17m REFLECTING
+T+1h18m reflector saves config "mickmumpitz-ccc-3.8"
+                              (composite 8.31 ±0.35, arcface 0.71)
                               → DONE
 T+1h18m iter 2 PLANNED (forced: qwen-image-edit-one-headshot)
         … (forced iters 2 and 3, same shape) …
@@ -740,23 +793,25 @@ T+4h    iter 4 PLANNED (PLANNER NOW FREE)
         - planner cites belief #2: "Flux backbones outscore SDXL on
           skin realism by ~0.4"
         - proposes a Flux-based modification of the best so far
-T+5h30m iter 4 done. score 4.91. belief #2 confidence rises to 0.75.
+T+5h30m iter 4 done. composite 8.55 (arcface 0.78).
+                       belief #2 confidence rises to 0.75.
 …
 T+22h   iter 14. world model has 12 beliefs, 3 understandings,
-        2 intuitions, 4 saved configs. best is 4.93.
+        2 intuitions, 4 saved configs. best composite 8.74.
 T+24h   iter 15. plateau detector: 5 iters without Δ > 1.5σ.
                  → exit "plateau"
 
 OUTCOME:
    best config: "mickmumpitz-tuned-007"
                 workflow.json + param_dict
-                score 4.93 ± 0.038 (FC 4.94)
+                composite 8.74 ± 0.32 (arcface 0.79)
    total cost:  $24.10  (6 of 30 pod-hours, $9 of $50 judge)
    world model: queryable for the next run
    report:      ~/.aar/projects/comfyui-character/REPORT.md
-                "we hit 4.93 ± 0.038 against a 4.95 target. ceiling
-                is plausibly real. next investment: qfloat8 Elena
-                retrain (belief #8) — replace LoRA layer in
+                "we hit 8.74 ± 0.32 against an 8.5 target — passed,
+                 but arcface plateaued at 0.79 (target 0.75 met but
+                 no headroom). next investment: qfloat8 Elena retrain
+                 (belief #8) — replace LoRA layer in
                 mickmumpitz-tuned-007 and re-run."
 ```
 
