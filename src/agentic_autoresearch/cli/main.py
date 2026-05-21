@@ -227,6 +227,31 @@ def credentials_list():
     click.echo(f"  huggingface: {'configured' if c.huggingface else 'missing'}")
 
 
+@cli.command(name="ingest")
+@click.argument("problem", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--project", default=None, help="DB project name (default: derived from spec.md frontmatter)")
+@click.option("--dry-run", is_flag=True)
+@click.option("--verbose", is_flag=True)
+def ingest_cmd(problem: Path, project, dry_run: bool, verbose: bool):
+    """Ingest external knowledge into the world model from <problem>/sources.yaml."""
+    from agentic_autoresearch.agents.ingest import ingest_from_sources
+
+    sources = problem / "sources.yaml"
+    if not sources.exists():
+        raise click.UsageError(f"no sources.yaml in {problem}")
+    # crude: derive project name from spec.md frontmatter if not given
+    if project is None:
+        spec_text = (problem / "spec.md").read_text() if (problem / "spec.md").exists() else ""
+        import re
+        m = re.search(r"^name:\s*(\S+)", spec_text, re.MULTILINE)
+        project = m.group(1) if m else problem.name
+    click.echo(f"project: {project}")
+    summary = ingest_from_sources(sources, project=project, dry_run=dry_run, verbose=verbose)
+    click.echo("---")
+    for k, v in summary.items():
+        click.echo(f"  {k}: {v}")
+
+
 @cli.group()
 def pods():
     """RunPod pod management (start/poll/stop, leak detection)."""
