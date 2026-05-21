@@ -227,6 +227,60 @@ def credentials_list():
     click.echo(f"  huggingface: {'configured' if c.huggingface else 'missing'}")
 
 
+@cli.group()
+def pods():
+    """RunPod pod management (start/poll/stop, leak detection)."""
+
+
+@pods.command(name="list")
+@click.option("--project", default="comfyui-character", show_default=True)
+def pods_list(project: str):
+    """Show pods registered locally + their remote status."""
+    from agentic_autoresearch.agents.runpod import list_orphans
+    from agentic_autoresearch.credentials import load
+    from agentic_autoresearch.paths import project_dir
+
+    c = load()
+    c.require("runpod")
+    pd = project_dir(project)
+    orphans = list_orphans(c.runpod.api_key, pd, max_age_seconds=0)
+    if not orphans:
+        click.echo("no pods registered for this project.")
+        return
+    for o in orphans:
+        click.echo(
+            f"  {o['pod_id']}  gpu={o.get('gpu')}  dc={o.get('datacenter')}  "
+            f"age={int(o['age_seconds'])}s  remote={o.get('remote_status')}"
+        )
+
+
+@pods.command(name="reap")
+@click.option("--project", default="comfyui-character", show_default=True)
+@click.option("--max-age-hours", type=float, default=3.0, show_default=True)
+def pods_reap(project: str, max_age_hours: float):
+    """Stop pods older than --max-age-hours or remotely dead."""
+    from agentic_autoresearch.agents.runpod import reap_orphans
+    from agentic_autoresearch.credentials import load
+    from agentic_autoresearch.paths import project_dir
+
+    c = load()
+    c.require("runpod")
+    stopped = reap_orphans(c.runpod.api_key, project_dir(project), max_age_hours * 3600)
+    click.echo(f"stopped {len(stopped)} pod(s): {stopped}")
+
+
+@pods.command(name="volumes")
+def pods_volumes():
+    """List your RunPod network volumes."""
+    from agentic_autoresearch.agents.runpod import list_volumes
+    from agentic_autoresearch.credentials import load
+
+    c = load()
+    c.require("runpod")
+    for v in list_volumes(c.runpod.api_key):
+        click.echo(f"  {v.get('id')}  dc={v.get('dataCenterId')}  size={v.get('size')}GB  name={v.get('name')!r}")
+
+
 @credentials.command(name="verify")
 def credentials_verify():
     """Make one cheap API call per credential to verify it works."""
