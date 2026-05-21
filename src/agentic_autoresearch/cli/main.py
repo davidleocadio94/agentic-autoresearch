@@ -189,3 +189,59 @@ def _start_dashboard_thread():
     t.start()
     time.sleep(0.3)
     click.echo("dashboard: http://127.0.0.1:8765")
+
+
+@cli.group()
+def credentials():
+    """Manage ~/.agentic-autoresearch/credentials.toml (chmod 600)."""
+
+
+@credentials.command(name="init")
+def credentials_init():
+    """Create credentials.toml from template if missing."""
+    from agentic_autoresearch.credentials import credentials_path, init_file
+
+    if credentials_path().exists():
+        click.echo(f"already exists: {credentials_path()}")
+        return
+    p = init_file()
+    click.echo(f"created (chmod 600): {p}")
+    click.echo("edit it to fill in your secrets.")
+
+
+@credentials.command(name="list")
+def credentials_list():
+    """Show which credentials are configured (values redacted)."""
+    from agentic_autoresearch.credentials import CredentialError, credentials_path, load
+
+    try:
+        c = load()
+    except CredentialError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"file: {credentials_path()}")
+    click.echo(f"  runpod:      {'configured' if c.runpod else 'missing'}")
+    if c.runpod:
+        click.echo(f"    volume:    {c.runpod.volume_id} @ {c.runpod.datacenter}")
+        click.echo(f"    gpus:      {', '.join(c.runpod.gpus)}")
+    click.echo(f"  anthropic:   {'configured' if c.anthropic else 'missing'}")
+    click.echo(f"  huggingface: {'configured' if c.huggingface else 'missing'}")
+
+
+@credentials.command(name="verify")
+def credentials_verify():
+    """Make one cheap API call per credential to verify it works."""
+    from agentic_autoresearch.credentials import CredentialError, load, validate_all
+
+    try:
+        c = load()
+    except CredentialError as e:
+        raise click.ClickException(str(e))
+    results = validate_all(c)
+    any_fail = False
+    for name, (ok, msg) in results.items():
+        marker = "OK" if ok else "FAIL"
+        click.echo(f"  {name:12s} {marker} {msg}")
+        if not ok:
+            any_fail = True
+    if any_fail:
+        raise click.ClickException("one or more credentials failed validation")
