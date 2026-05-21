@@ -549,29 +549,39 @@ USER HOME (~)
         │   └── obs/                       dashboard
         │
         ├── problems/
-        │   ├── hello-world/               bundled self-test
-        │   └── comfyui-character/
-        │       ├── spec.md                NO SECRETS. declares
-        │       │                          requires_credentials: [...]
-        │       ├── eval/
-        │       │   ├── score.py           vision-judge wrapper
-        │       │   ├── prompts.json       5 fixed eval prompts
-        │       │   └── references/
-        │       │       ├── visible/brooke_{1,2,3}.png
-        │       │       ├── held_out/brooke_{4,5}.png
-        │       │       └── identity.png
-        │       ├── references/
-        │       │   └── seed.jsonl         3 validated 2026 stacks
-        │       ├── workflows/
-        │       │   ├── flux-pulid.json
-        │       │   ├── qwen-edit.json
-        │       │   └── sdxl-ipadapter-controlnet.json
-        │       └── src/comfyui_character/
-        │           ├── runner.py          THE mutable file (actor edits)
-        │           └── config_schema.py   typed config dict
+        │   └── hello-world/               bundled self-test (only one
+        │                                   that lives in-tree; real
+        │                                   problems are external repos)
         │
         └── .claude/plans/
             ├── comfyui-character-and-framework.md   THE plan
+
+~/Documents/comfyui-experiments/         (PRIVATE repo, separate)
+    ├── spec.md                          NO SECRETS. declares
+    │                                    requires_credentials: [...]
+    ├── eval/
+    │   ├── rubric.md                    Opus narrowed rubric (checksummed)
+    │   ├── arcface.py
+    │   ├── dinov2.py
+    │   ├── clip_sim.py
+    │   ├── anatomy.py
+    │   ├── opus_rubric.py
+    │   ├── compose.py                   entrypoint → scores.json
+    │   ├── prompts.json                 5 fixed eval prompts
+    │   └── references/
+    │       ├── visible/brooke_{1,2,3}.png
+    │       ├── held_out/brooke_{4,5}.png
+    │       └── identity.png
+    ├── references/
+    │   └── seed.jsonl                   3 validated 2026 stacks
+    ├── workflows/
+    │   ├── flux-pulid.json
+    │   ├── qwen-edit.json
+    │   └── sdxl-ipadapter-controlnet.json
+    ├── src/comfyui_experiments/
+    │   ├── runner.py                    THE mutable file (actor edits)
+    │   └── config_schema.py             typed config dict
+    └── .claude/plans/                   plan mirrored from autoresearch
             └── diagrams.md                          THIS file
 ```
 
@@ -605,7 +615,7 @@ USER HOME (~)
   1. spec.md NEVER contains keys, tokens, pod IDs, or volume IDs.
   2. logs/ writes are passed through a redactor that masks any string
      matching credential VALUES known at startup.
-  3. No `.env` files anywhere under problems/ or src/.
+  3. No `.env` files in framework `src/` or in any experiment repo.
   4. No shell-exported env vars set by the framework itself
      (so other tools running in the user's shell never see them).
   5. agent subprocesses get ONLY the keys they need for the API

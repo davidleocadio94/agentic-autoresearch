@@ -133,7 +133,7 @@ api_key = "..."             # comfyui-character problem does NOT use this
 ### spec.md credentials declaration
 
 ```yaml
-# in problems/comfyui-character/spec.md frontmatter
+# in comfyui-experiments/spec.md frontmatter
 requires_credentials:
   - runpod          # pod lifecycle
   - anthropic       # planner/actor/reflector + vision judge
@@ -538,10 +538,16 @@ verified by row count before delete of the old file).
 
 ---
 
-## ComfyUI problem scaffold
+## ComfyUI problem scaffold (external private repo)
+
+The comfyui work lives in its own private repo,
+`github.com/davidleocadio94/comfyui-experiments`, NOT under
+`problems/` in this repo. The framework operates on any external
+problem directory via `autoresearch run <path>`. This keeps the
+framework public/portfolio-friendly and the experiment data private.
 
 ```
-problems/comfyui-character/
+~/Documents/comfyui-experiments/   (private repo)
   spec.md                   # problem statement, eval, budget, kill
                             # conditions, requires_credentials
   eval/
@@ -684,7 +690,7 @@ thoughts. Budget kill-condition is a strict cap, not a target.
 
   USER
     │
-    │ writes once: problems/comfyui-character/spec.md
+    │ writes once: comfyui-experiments/spec.md (in the private repo)
     │ runs:        autoresearch run comfyui-character
     ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -847,7 +853,7 @@ thoughts. Budget kill-condition is a strict cap, not a target.
 ### Comfyui-specific work
 
 7. **Ensemble eval modules.** Six small files in
-   `problems/comfyui-character/eval/`:
+   `comfyui-experiments/eval/` (external private repo):
    - `arcface.py` — insightface buffalo_l (already on the volume)
    - `dinov2.py` — facebookresearch DINOv2 ViT-B/14
    - `clip_sim.py` — open_clip ViT-L/14

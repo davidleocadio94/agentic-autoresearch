@@ -118,9 +118,17 @@ USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
 """
 
 
-def connect(path: Path | None = None) -> sqlite3.Connection:
-    """Open the framework DB with sqlite-vec loaded."""
-    p = path or db_path()
+def connect(path: Path | None = None, project: str | None = None) -> sqlite3.Connection:
+    """Open the framework DB with sqlite-vec loaded.
+
+    Pass either `path` (explicit file) or `project` (resolves via
+    paths.db_path). If neither, falls back to legacy flat path (which
+    migrates on first access).
+    """
+    if path is not None:
+        p = path
+    else:
+        p = db_path(project)
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(p, isolation_level=None)  # autocommit; we use BEGIN explicitly
     conn.row_factory = sqlite3.Row
@@ -132,9 +140,16 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(path: Path | None = None) -> Path:
-    """Idempotent — safe to call on every framework start."""
-    p = path or db_path()
+def init_db(path: Path | None = None, project: str | None = None) -> Path:
+    """Idempotent — safe to call on every framework start.
+
+    Per-project: pass project='comfyui-character'. Legacy callers without
+    a project still work via the migrated flat path.
+    """
+    if path is not None:
+        p = path
+    else:
+        p = db_path(project)
     conn = connect(p)
     try:
         for stmt in SCHEMA_SQL.strip().split(";"):
@@ -162,9 +177,9 @@ def init_db(path: Path | None = None) -> Path:
 
 
 @contextmanager
-def db():
+def db(project: str | None = None):
     """Context manager — short-lived connection per call."""
-    conn = connect()
+    conn = connect(project=project)
     try:
         yield conn
     finally:
