@@ -115,6 +115,97 @@ USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS iteration_lesson_embed
 USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
+
+-- ─── World model (beliefs / thoughts / understandings / intuitions / configs) ───
+--
+-- The promotion path:
+--   thoughts (proposed by planner) → beliefs (confirmed) →
+--   understandings (causal explanations) → intuitions (soft priors)
+-- Configurations are first-class: every iter that beats prior-best gets saved.
+
+CREATE TABLE IF NOT EXISTS thoughts (
+    id                  TEXT PRIMARY KEY,
+    content             TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'proposed',  -- proposed/testing/confirmed/refuted
+    parent_belief_ids   TEXT,                              -- json array
+    iter_proposed       TEXT REFERENCES iterations(id),
+    iter_resolved       TEXT REFERENCES iterations(id),
+    refute_reason       TEXT,
+    created_at          TEXT NOT NULL,
+    resolved_at         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_thoughts_status ON thoughts(status);
+
+CREATE TABLE IF NOT EXISTS beliefs (
+    id                  TEXT PRIMARY KEY,
+    content             TEXT NOT NULL,
+    confidence          REAL NOT NULL,                     -- 0..1
+    evidence_iters      TEXT NOT NULL,                     -- json array
+    status              TEXT NOT NULL DEFAULT 'active',    -- active/retired/contradicted/external_claim
+    source_url          TEXT,                              -- non-null for external_claim
+    parent_thought_id   TEXT REFERENCES thoughts(id),
+    contradiction_reason TEXT,
+    created_at          TEXT NOT NULL,
+    last_validated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_beliefs_status ON beliefs(status);
+CREATE INDEX IF NOT EXISTS idx_beliefs_confidence ON beliefs(confidence);
+
+CREATE TABLE IF NOT EXISTS understandings (
+    id                      TEXT PRIMARY KEY,
+    content                 TEXT NOT NULL,
+    supporting_belief_ids   TEXT NOT NULL,                 -- json array
+    confidence              REAL NOT NULL,
+    created_at              TEXT NOT NULL,
+    last_validated_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS intuitions (
+    id                              TEXT PRIMARY KEY,
+    content                         TEXT NOT NULL,
+    weight                          REAL NOT NULL,         -- 0..1
+    supporting_understanding_ids    TEXT NOT NULL,         -- json array
+    created_at                      TEXT NOT NULL,
+    last_used_at                    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_intuitions_weight ON intuitions(weight);
+
+CREATE TABLE IF NOT EXISTS configurations (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL UNIQUE,
+    parent_config_id    TEXT REFERENCES configurations(id),
+    workflow_json       TEXT NOT NULL,                     -- the ComfyUI workflow
+    param_dict          TEXT NOT NULL,                     -- structured config (json)
+    best_score          REAL NOT NULL,
+    best_score_std      REAL,
+    arcface_mean        REAL,
+    composite_mean      REAL,
+    replicates          INTEGER,
+    provenance_iter_id  TEXT REFERENCES iterations(id),
+    sample_image_path   TEXT,                              -- relative path inside iters/
+    created_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_configs_score ON configurations(best_score);
+
+-- Embeddings for world-model retrieval.
+-- Text-content embeddings (thoughts/beliefs/understandings/intuitions) are
+-- written by the framework when rows are inserted via the world-model API.
+-- Image-content embedding (configurations.sample) uses open_clip ViT-L/14 = 768.
+
+CREATE VIRTUAL TABLE IF NOT EXISTS thoughts_embed
+USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS beliefs_embed
+USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS understandings_embed
+USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS intuitions_embed
+USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS configurations_sample_embed
+USING vec0(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}]);
 """
 
 
