@@ -107,16 +107,57 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
         # Start ComfyUI on the pod (background).
         _start_comfyui(pod)
 
-        # Run iterations.
-        for iter_num in range(1, max_iters + 1):
+        # Run iterations until target / budget / plateau.
+        iters_root = project_dir(project) / "iters"
+        plateau_count = 0
+        plateau_threshold = 5  # iters without ≥1% composite improvement
+        last_best = 0.0
+        from agentic_autoresearch.agents.planner_ensemble import plan as plan_iter
+
+        iter_num = 0
+        while True:
+            iter_num += 1
+            if iter_num > max_iters:
+                print(f"[ensemble] max-iters ({max_iters}) reached")
+                break
             if time.monotonic() > deadline:
                 print(f"[ensemble] max-hours reached")
                 break
 
-            # Pick category: forced for first N, then planner-free
-            category, parent_name, workflow_template = _pick_iter(
-                iter_num, forced, spec, project
-            )
+            # Choose the iter shape. Forced for iter ≤ len(forced); after,
+            # the planner reads the world model and decides.
+            config_changes: dict = {}
+            if iter_num <= len(forced):
+                category, parent_name, workflow_template = _pick_iter(
+                    iter_num, forced, spec, project
+                )
+            else:
+                planner_log = iter_dir(project, iter_num) / "planner.log"
+                print(f"\n[ensemble] PLANNER (claude -p, subscription) for iter {iter_num}")
+                hyp = plan_iter(
+                    project=project, iter_num=iter_num,
+                    spec_repo=spec.repo_path, iters_root=iters_root,
+                    log_path=planner_log,
+                )
+                if hyp is None:
+                    print(f"[ensemble] planner returned None; falling back to replicate-best")
+                    category, parent_name, workflow_template = _pick_iter(
+                        iter_num, forced, spec, project,
+                    )
+                else:
+                    category = hyp.get("category", "modify-current-best")
+                    parent_name = hyp.get("parent_config")
+                    workflow_template = Path(hyp.get("workflow_template", "flux-pulid.json")).name
+                    config_changes = hyp.get("config_changes") or {}
+                    # Persist the hypothesis for inspection.
+                    (iter_dir(project, iter_num) / "hypothesis.json").write_text(
+                        json.dumps(hyp, indent=2)
+                    )
+                    print(f"[planner] iter {iter_num}: category={category} "
+                          f"parent={parent_name} workflow={workflow_template}")
+                    print(f"[planner] config_changes: {config_changes}")
+                    print(f"[planner] rationale: {hyp.get('rationale','')[:200]}")
+
             seeds = [_rand_seed() for _ in range(seeds_per)]
 
             print(f"\n[ensemble] === ITER {iter_num} ===")
@@ -131,6 +172,7 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                 pod=pod, creds=creds,
                 category=category, parent_name=parent_name,
                 workflow_template=workflow_template,
+                config_changes=config_changes,
                 seeds=seeds,
                 iter_local=iter_local,
                 iter_volume=iter_volume,
@@ -144,6 +186,18 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                 print(f"[ensemble] TARGET REACHED: composite={best['composite']} "
                       f"arcface={best['arcface']}")
                 break
+
+            # Plateau detection: bail if composite doesn't improve by >1%
+            # over `plateau_threshold` consecutive iters.
+            current_best = best.get("composite", 0.0) if best else 0.0
+            if current_best > last_best * 1.01:
+                plateau_count = 0
+                last_best = current_best
+            else:
+                plateau_count += 1
+                if plateau_count >= plateau_threshold:
+                    print(f"[ensemble] PLATEAU: {plateau_count} iters with no improvement; stopping")
+                    break
 
     finally:
         if pod and opts.stop_pod_after:
@@ -165,6 +219,7 @@ def _run_one_ensemble_iter(
     category: str, parent_name: str | None,
     workflow_template: str, seeds: list[int],
     iter_local: Path, iter_volume: Path,
+    config_changes: dict | None = None,
 ) -> bool:
     """Submit workflow on pod via pod_runtime.py, wait for results."""
     # Submit on the pod (one ssh command, daemonized).
@@ -182,6 +237,12 @@ def _run_one_ensemble_iter(
 
     seeds_arg = " ".join(str(s) for s in seeds)
     anthropic_key = creds.anthropic.api_key
+
+    # config_changes from planner → pass as JSON to pod_runtime via CLI.
+    # Use single-quote-safe encoding so it survives the bash -c '...' wrap.
+    cc_json = json.dumps(config_changes or {})
+    # Escape single quotes for nesting inside bash -c '...'.
+    cc_json_escaped = cc_json.replace("'", "'\"'\"'")
 
     # S3 env vars for pod_runtime to upload images and generate presigned URLs.
     # When not configured, pod_runtime soft-fails and the loop falls back to
@@ -226,6 +287,7 @@ def _run_one_ensemble_iter(
         f"  --output {remote_output} "
         f"  --volume-runs-root {iter_volume} "
         f"  --anthropic-api-key {anthropic_key} "
+        f"  --extra-params-json '{cc_json_escaped}' "
         f"  ; echo $? > {rc_file}"
         f"' </dev/null >{iter_log} 2>&1 &) && echo launched"
     )

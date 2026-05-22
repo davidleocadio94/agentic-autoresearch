@@ -236,12 +236,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--volume-runs-root", required=True, type=Path,
                     help="On the pod: e.g. /runpod-volume/runs/<run_id>/iter_NNN/")
     ap.add_argument("--anthropic-api-key", default=None)
+    ap.add_argument("--extra-params-json", default=None,
+                    help="JSON string of {param: value} overrides applied to "
+                         "the workflow template (e.g. '{\"id_weight\":1.10}'). "
+                         "Comes from the planner's config_changes.")
     args = ap.parse_args(argv)
+
+    extra_params: dict = {}
+    if args.extra_params_json:
+        try:
+            extra_params = json.loads(args.extra_params_json)
+            print(f"[pod-runtime] extra params: {extra_params}")
+        except json.JSONDecodeError as e:
+            print(f"[pod-runtime] could not parse --extra-params-json: {e}", file=sys.stderr)
 
     iter_tmp = Path("/tmp") / f"iter_{int(time.time())}"
     candidates = iter_tmp / "candidates"
     print(f"[pod-runtime] candidates → {candidates}")
-    paths = run_batch(args.workflow, args.prompts, args.seeds, candidates)
+    paths = run_batch(args.workflow, args.prompts, args.seeds, candidates,
+                      extra_params=extra_params)
     print(f"[pod-runtime] collected {len(paths)} candidates")
     if not paths:
         print("[pod-runtime] no candidates — comfyui failed?", file=sys.stderr)
