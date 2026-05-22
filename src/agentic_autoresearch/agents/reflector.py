@@ -357,8 +357,9 @@ def dispatch_tool_calls(*, project: str, reflection: dict, iter_id: str) -> int:
                     )
                 elif name == "confirm_belief":
                     wm.confirm_belief(args["belief_id"], new_evidence_iter=iter_id)
-                elif name == "contradict_belief":
-                    wm.contradict_belief(args["belief_id"], reason=args.get("reason", ""))
+                elif name in ("contradict_belief", "refute_belief"):
+                    # Reflector sometimes uses 'refute_belief'; alias both.
+                    wm.contradict_belief(args["belief_id"], reason=args.get("reason", args.get("content", "")))
                 elif name == "add_understanding":
                     wm.add_understanding(
                         content=args["content"],
