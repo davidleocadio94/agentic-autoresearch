@@ -228,7 +228,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--visible-refs", required=True, type=Path)
     ap.add_argument("--held-out-refs", required=True, type=Path)
     ap.add_argument("--rubric", required=True, type=Path)
-    ap.add_argument("--output", required=True, type=Path)
+    ap.add_argument("--output", required=True, type=Path,
+                    help="Local dir on Mac to receive scores.json + workflow.json only. "
+                         "Images NEVER come back here — they live on the volume "
+                         "and are surfaced via S3 presigned URLs.")
+    ap.add_argument("--volume-runs-root", required=True, type=Path,
+                    help="On the pod: e.g. /runpod-volume/runs/<run_id>/iter_NNN/")
     ap.add_argument("--anthropic-api-key", default=None)
     args = ap.parse_args(argv)
 
@@ -254,13 +259,41 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[pod-runtime] eval failed rc={rc}", file=sys.stderr)
         return rc
 
-    # Copy the workflow.json into the output dir so the orchestrator gets
-    # the exact config that produced winner.webp.
+    # Copy the workflow.json into the output dir.
     shutil.copy2(args.workflow, args.output / "workflow.json")
 
-    # Wipe /tmp/iter_*/candidates — Mac never sees them.
+    # Move winner.webp + every candidate THUMBNAIL onto the network volume,
+    # not back to the Mac. The orchestrator reads scores.json (still in
+    # args.output) and serves images via S3 presigned URLs.
+    args.volume_runs_root.mkdir(parents=True, exist_ok=True)
+    winner_src = args.output / "winner.webp"
+    if winner_src.exists():
+        winner_dst = args.volume_runs_root / "winner.webp"
+        shutil.move(str(winner_src), str(winner_dst))
+        print(f"[pod-runtime] winner → {winner_dst}  (S3 key: runs/<run_id>/iter_NNN/winner.webp)")
+
+    # Optional: generate small thumbnails (256px) of every candidate so the
+    # dashboard can show a strip of all 15 without the user clicking into
+    # full-res. Tiny disk, big UX win.
+    try:
+        from PIL import Image
+        thumbs_dir = args.volume_runs_root / "thumbs"
+        thumbs_dir.mkdir(exist_ok=True)
+        for p in paths:
+            try:
+                img = Image.open(p).convert("RGB")
+                img.thumbnail((256, 256))
+                img.save(thumbs_dir / f"{p.stem}.webp", "WEBP", quality=80)
+            except Exception:
+                continue
+    except ImportError:
+        pass
+
+    # Wipe /tmp/iter_*/candidates — pod's local disk doesn't keep them
+    # either. Only the volume copy (full-res winner + thumbs) survives.
     shutil.rmtree(candidates, ignore_errors=True)
-    print(f"[pod-runtime] done → {args.output}/{{scores.json,winner.webp,workflow.json}}")
+    print(f"[pod-runtime] done. Mac gets: scores.json + workflow.json only.")
+    print(f"[pod-runtime] Volume gets:    {args.volume_runs_root}/winner.webp + thumbs/")
     return 0
 
 

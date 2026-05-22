@@ -53,8 +53,9 @@ class PodHandle:
     gpu: str
     volume_id: str
     started_at: float                  # unix seconds
-    comfyui_url: str | None = None     # http://<pod>:8188 once reachable
-    ssh: str | None = None
+    comfyui_url: str | None = None     # https proxy URL
+    ssh: str | None = None             # "root@<ip> -p <mapped_port>"
+    ssh_port: int | None = None        # mapped public port for container's 22
     public_ip: str | None = None
     cumulative_seconds_estimate: float = 0.0
     last_seen: float = field(default_factory=time.time)
@@ -138,7 +139,7 @@ def start_pod(
     gpus: list[str],
     image: str = DEFAULT_IMAGE,
     container_disk_gb: int = 50,
-    ports: str = "8188/http,22/tcp",   # ComfyUI default + SSH
+    ports: list[str] | None = None,   # ["22/tcp", "8188/http"]
     env: dict[str, str] | None = None,
     name: str | None = None,
     project_dir: Path | None = None,
@@ -152,6 +153,8 @@ def start_pod(
 
     `project_dir` is for registry; if None, registry is skipped.
     """
+    if ports is None:
+        ports = ["22/tcp", "8188/http"]
     last_err: Exception | None = None
     handle: PodHandle | None = None
     for gpu in gpus:
@@ -164,6 +167,8 @@ def start_pod(
                 "containerDiskInGb": container_disk_gb,
                 "volumeMountPath": "/runpod-volume",
                 "networkVolumeId": volume_id,
+                "dataCenterIds": [datacenter],  # required for volume pods
+                "cloudType": "SECURE",          # required for volume pods
                 "ports": ports,
                 "env": env or {},
                 "supportPublicIp": True,
@@ -213,7 +218,16 @@ def _wait_ready(
     interval: float,
     project_dir: Path | None,
 ) -> None:
+    """Wait for THREE conditions, not just desiredStatus=RUNNING:
+      1. desiredStatus == 'RUNNING'
+      2. publicIp != ''
+      3. portMappings['22'] is set
+
+    Then optionally TCP-probe sshd. desiredStatus alone is a lie — the
+    pod can sit at 'RUNNING' for minutes while still scheduling.
+    """
     deadline = time.time() + timeout
+    last_log = 0.0
     while time.time() < deadline:
         try:
             info = _request("GET", f"/pods/{handle.pod_id}", api_key)
@@ -221,18 +235,25 @@ def _wait_ready(
             time.sleep(interval)
             continue
         status = info.get("desiredStatus") or info.get("status")
-        if status in ("RUNNING", "running"):
-            # Build comfyui URL. RunPod exposes HTTP ports via
-            # https://<pod_id>-<port>.proxy.runpod.net/
+        public_ip = info.get("publicIp") or ""
+        port_mappings = info.get("portMappings") or {}
+        ssh_port = port_mappings.get("22") or port_mappings.get(22)
+
+        if status in ("RUNNING", "running") and public_ip and ssh_port:
+            handle.public_ip = public_ip
+            handle.ssh_port = int(ssh_port)
+            handle.ssh = f"root@{public_ip} -p {ssh_port}"
             handle.comfyui_url = f"https://{handle.pod_id}-8188.proxy.runpod.net"
-            handle.public_ip = info.get("publicIp")
-            handle.ssh = info.get("ssh")
             handle.last_seen = time.time()
             if project_dir is not None:
                 _register_pod(project_dir, handle)
             return
+
+        if time.time() - last_log > 20:
+            print(f"  pod {handle.pod_id}: status={status} ip={public_ip or '<none>'} ssh_port={ssh_port or '<none>'}")
+            last_log = time.time()
         time.sleep(interval)
-    raise RunPodError(f"pod {handle.pod_id} did not become RUNNING within {timeout}s")
+    raise RunPodError(f"pod {handle.pod_id} did not become fully ready within {timeout}s")
 
 
 # ─── poll + stop ─────────────────────────────────────────────────────

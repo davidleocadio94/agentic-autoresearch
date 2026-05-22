@@ -54,10 +54,22 @@ class HuggingFaceCreds:
 
 
 @dataclass
+class RunPodS3Creds:
+    """RunPod's S3-API uses a SEPARATE secret from the REST API key.
+    Created in console → Settings → S3 API Keys."""
+    access_key: str   # your RunPod user id (yes, the user id IS the access key)
+    secret_key: str   # the secret created in console
+
+    def __repr__(self) -> str:
+        return "RunPodS3Creds(access_key=<redacted>, secret_key=<redacted>)"
+
+
+@dataclass
 class Credentials:
     runpod: RunPodCreds | None = None
     anthropic: AnthropicCreds | None = None
     huggingface: HuggingFaceCreds | None = None
+    runpod_s3: RunPodS3Creds | None = None
 
     def require(self, *names: str) -> None:
         missing = [n for n in names if getattr(self, n, None) is None]
@@ -114,6 +126,10 @@ def load() -> Credentials:
         h = data["huggingface"]
         if h.get("token"):
             creds.huggingface = HuggingFaceCreds(token=h["token"])
+    if "runpod_s3" in data:
+        s = data["runpod_s3"]
+        if s.get("access_key") and s.get("secret_key"):
+            creds.runpod_s3 = RunPodS3Creds(access_key=s["access_key"], secret_key=s["secret_key"])
     return creds
 
 
@@ -236,6 +252,13 @@ api_key    = ""                    # sk-ant-...
 
 [huggingface]
 token      = ""                    # hf_...
+
+[runpod_s3]
+# Separate from runpod.api_key. Create in Console → Settings → S3 API Keys.
+# Used so the pod can write images to the volume's S3 endpoint and the Mac
+# can fetch presigned URLs without local download.
+access_key = ""                    # your RunPod user id
+secret_key = ""                    # the S3-API secret
 """
 
 
