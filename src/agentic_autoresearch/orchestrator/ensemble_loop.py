@@ -110,7 +110,9 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
         # Run iterations until target / budget / plateau.
         iters_root = project_dir(project) / "iters"
         plateau_count = 0
-        plateau_threshold = 5  # iters without ≥1% composite improvement
+        plateau_research_threshold = 3  # iters w/o improvement → researcher
+        plateau_threshold = 5           # iters w/o improvement → stop
+        researcher_fired = False        # one researcher invocation per run
         last_best = 0.0
         from agentic_autoresearch.agents.planner_ensemble import plan as plan_iter
 
@@ -187,14 +189,49 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                       f"arcface={best['arcface']}")
                 break
 
-            # Plateau detection: bail if composite doesn't improve by >1%
-            # over `plateau_threshold` consecutive iters.
+            # Plateau detection. Two thresholds:
+            #   plateau_research_threshold (=3): wake the researcher
+            #   plateau_threshold          (=5): stop the loop
+            # The researcher gets ONE shot per run; if it can't unstuck
+            # us, plateau→stop still fires.
             current_best = best.get("composite", 0.0) if best else 0.0
             if current_best > last_best * 1.01:
                 plateau_count = 0
                 last_best = current_best
             else:
                 plateau_count += 1
+                if (plateau_count == plateau_research_threshold
+                        and not researcher_fired):
+                    researcher_fired = True
+                    print(f"[ensemble] PLATEAU (research trigger): "
+                          f"{plateau_count} iters without improvement → "
+                          f"firing researcher agent")
+                    try:
+                        from agentic_autoresearch.agents.researcher import (
+                            research, validate_and_register_workflows,
+                        )
+                        rsrch_log = iter_dir(project, iter_num) / "researcher.log"
+                        result = research(
+                            project=project,
+                            experiment_repo=spec.repo_path,
+                            iters_root=iters_root,
+                            log_path=rsrch_log,
+                        )
+                        if result is None:
+                            print(f"[ensemble] researcher returned no result")
+                        else:
+                            (iter_dir(project, iter_num) / "research.json").write_text(
+                                json.dumps(result, indent=2)
+                            )
+                            registered = validate_and_register_workflows(
+                                parsed=result,
+                                experiment_repo=spec.repo_path,
+                                project=project,
+                            )
+                            print(f"[ensemble] researcher → added {len(registered)} workflow(s); "
+                                  f"summary: {result.get('summary','')[:200]}")
+                    except Exception as e:
+                        print(f"[ensemble] researcher errored: {e!r}")
                 if plateau_count >= plateau_threshold:
                     print(f"[ensemble] PLATEAU: {plateau_count} iters with no improvement; stopping")
                     break
