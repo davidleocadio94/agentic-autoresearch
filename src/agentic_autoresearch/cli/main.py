@@ -42,10 +42,38 @@ def new(name: str, parent: Path):
 @click.option("--target-score", type=float, default=None)
 @click.option("--dashboard/--no-dashboard", default=True)
 def run(problem: Path, max_hours, max_iters, target_score, dashboard: bool):
-    """Run the autoresearch loop on PROBLEM until exit condition."""
+    """Run the autoresearch loop on PROBLEM until exit condition.
+
+    Dispatches based on spec shape:
+      - ensemble eval (compose.py / arcface markers in spec.md body)
+        → ensemble_loop (pod-side rendering)
+      - otherwise → original deterministic loop (OMR-shape)
+    """
     spec_path = problem / "spec.md"
     if not spec_path.exists():
         raise click.UsageError(f"no spec.md in {problem}")
+
+    # Pick loop shape.
+    from agentic_autoresearch.spec import parse_spec
+    from agentic_autoresearch.agents.prompts import prompts_for_spec
+    spec = parse_spec(spec_path)
+    shape = prompts_for_spec(spec)["shape"]
+
+    if shape == "ensemble":
+        from agentic_autoresearch.orchestrator.ensemble_loop import (
+            EnsembleLoopOptions, run_ensemble_loop,
+        )
+        click.echo(f"[run] ensemble shape detected for {spec.name}")
+        opts_e = EnsembleLoopOptions(
+            max_hours=max_hours,
+            max_iters=max_iters,
+            target_composite=target_score,
+        )
+        rid = run_ensemble_loop(spec_path, opts_e)
+        click.echo(f"run finished: {rid}")
+        return
+
+    # Original OMR-shape loop.
     init_db()
     if dashboard:
         _start_dashboard_thread()
