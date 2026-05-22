@@ -237,13 +237,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="On the pod: e.g. /runpod-volume/runs/<run_id>/iter_NNN/")
     ap.add_argument("--anthropic-api-key", default=None)
     ap.add_argument("--extra-params-json", default=None,
-                    help="JSON string of {param: value} overrides applied to "
-                         "the workflow template (e.g. '{\"id_weight\":1.10}'). "
-                         "Comes from the planner's config_changes.")
+                    help="(legacy) JSON string of overrides; prefer --extra-params-b64")
+    ap.add_argument("--extra-params-b64", default=None,
+                    help="Base64-encoded JSON of {param: value} overrides applied to "
+                         "the workflow template. Used because bash quoting of "
+                         "raw JSON inside `bash -c '...'` is brittle.")
     args = ap.parse_args(argv)
 
     extra_params: dict = {}
-    if args.extra_params_json:
+    if args.extra_params_b64:
+        try:
+            import base64
+            raw = base64.b64decode(args.extra_params_b64).decode()
+            extra_params = json.loads(raw)
+            print(f"[pod-runtime] extra params (from b64): {extra_params}")
+        except Exception as e:
+            print(f"[pod-runtime] could not decode --extra-params-b64: {e}", file=sys.stderr)
+    elif args.extra_params_json:
         try:
             extra_params = json.loads(args.extra_params_json)
             print(f"[pod-runtime] extra params: {extra_params}")

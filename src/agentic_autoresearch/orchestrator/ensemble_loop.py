@@ -238,11 +238,11 @@ def _run_one_ensemble_iter(
     seeds_arg = " ".join(str(s) for s in seeds)
     anthropic_key = creds.anthropic.api_key
 
-    # config_changes from planner → pass as JSON to pod_runtime via CLI.
-    # Use single-quote-safe encoding so it survives the bash -c '...' wrap.
+    # config_changes from planner → pass as base64 JSON to pod_runtime via CLI.
+    # base64 sidesteps every quoting nightmare in the bash -c '...' wrap.
+    import base64
     cc_json = json.dumps(config_changes or {})
-    # Escape single quotes for nesting inside bash -c '...'.
-    cc_json_escaped = cc_json.replace("'", "'\"'\"'")
+    cc_b64 = base64.b64encode(cc_json.encode()).decode()
 
     # S3 env vars for pod_runtime to upload images and generate presigned URLs.
     # When not configured, pod_runtime soft-fails and the loop falls back to
@@ -287,7 +287,7 @@ def _run_one_ensemble_iter(
         f"  --output {remote_output} "
         f"  --volume-runs-root {iter_volume} "
         f"  --anthropic-api-key {anthropic_key} "
-        f"  --extra-params-json '{cc_json_escaped}' "
+        f"  --extra-params-b64 {cc_b64} "
         f"  ; echo $? > {rc_file}"
         f"' </dev/null >{iter_log} 2>&1 &) && echo launched"
     )
@@ -343,7 +343,8 @@ def _run_one_ensemble_iter(
     composite_std = scores.get("per_signal", {}).get("composite", {}).get("std", 0)
     arcface_mean = scores.get("per_signal", {}).get("arcface_cosine", {}).get("mean", 0)
 
-    cfg_name = f"{workflow_template.replace('.json','')}-iter{iter_num:03d}"
+    # Include the run_id in the config name so it's unique across runs.
+    cfg_name = f"{workflow_template.replace('.json','')}-{run_id[:8]}-iter{iter_num:03d}"
     iter_id = f"{run_id}:iter_{iter_num:04d}"
 
     # Pull winner.webp from the pod's volume for the reflector to read.
