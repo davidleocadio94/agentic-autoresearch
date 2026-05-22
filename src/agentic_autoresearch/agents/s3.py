@@ -72,13 +72,18 @@ def presigned_url(client, bucket: str, key: str, expires_in: int = 86400) -> str
     )
 
 
-def list_keys(client, bucket: str, prefix: str = "") -> list[dict]:
-    """List object keys under a prefix."""
+def list_keys(client, bucket: str, prefix: str = "", max_keys: int = 1000) -> list[dict]:
+    """List object keys under a prefix.
+
+    Uses single ListObjectsV2 call (no pagination). RunPod's S3 facade
+    has a pagination bug where the same continuation token can be
+    returned twice — boto3 then raises PaginationError. Cap with
+    max_keys (1000 default, S3 max) and prefer narrow prefixes.
+    """
+    resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=max_keys)
     out: list[dict] = []
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for o in page.get("Contents", []) or []:
-            out.append({"key": o["Key"], "size": o["Size"], "last_modified": str(o["LastModified"])})
+    for o in resp.get("Contents", []) or []:
+        out.append({"key": o["Key"], "size": o["Size"], "last_modified": str(o["LastModified"])})
     return out
 
 
