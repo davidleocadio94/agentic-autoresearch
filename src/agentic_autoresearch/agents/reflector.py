@@ -84,11 +84,11 @@ ENSEMBLE EVAL RESULT (4 objective metrics):
   anatomy:         {anatomy_summary}
   gate failures:   {gate_failures_summary}
 
-WINNER IMAGE (presigned URL, valid 24h — pull with `curl`):
-  {winner_url}
+WINNER IMAGE (already pulled to local disk):
+  {winner_local_path}
 
-OPTIONAL THUMBS:
-{thumbs_block}
+ARCHIVAL S3 URL (for later viewing; do NOT need to curl):
+  {winner_url}
 
 WORLD-MODEL SNAPSHOT:
 {world_model_block}
@@ -96,10 +96,8 @@ WORLD-MODEL SNAPSHOT:
 ═════════════════════════════════════════════════════════
 YOUR JOB
 ═════════════════════════════════════════════════════════
-1. Fetch the winner image:
-     curl -s -o /tmp/iter_{iter_num}_winner.webp "{winner_url}"
-   Then use the Read tool on /tmp/iter_{iter_num}_winner.webp.
-   DELETE the file with `rm` when done so we don't pollute the Mac.
+1. Use the Read tool on {winner_local_path} to see the winner image.
+   (Don't curl anything; the orchestrator already pulled it.)
 
 2. LOOK at the image. Score the four narrowed dimensions metrics can't reach:
    - lighting_coherence       (1-10): are shadows physically consistent?
@@ -148,7 +146,8 @@ def build_prompt(*, iter_num: int, iter_id: str, category: str,
                  params: dict,
                  scores: dict,
                  target_composite: float,
-                 world_model_snapshot: dict) -> str:
+                 world_model_snapshot: dict,
+                 winner_local_path: str) -> str:
     """Assemble the REFLECTOR prompt from per-iter context."""
     ps = scores.get("per_signal", {})
 
@@ -209,8 +208,8 @@ def build_prompt(*, iter_num: int, iter_id: str, category: str,
         clip_mean=clip_mean,
         anatomy_summary=anatomy_summary,
         gate_failures_summary=gate_failures_summary,
+        winner_local_path=winner_local_path,
         winner_url=winner_url,
-        thumbs_block=thumbs_block,
         world_model_block=world_model_block,
     )
 
@@ -219,6 +218,7 @@ def reflect(*, project: str, iter_num: int, iter_id: str,
             category: str, parent_config: str | None,
             stack_entry: dict, params: dict,
             scores: dict, target_composite: float,
+            winner_local_path: str,
             log_path: Path | None = None) -> dict | None:
     """Run the local reflector via claude -p. Returns the parsed reflection
     dict, or None on failure.
@@ -240,6 +240,7 @@ def reflect(*, project: str, iter_num: int, iter_id: str,
         scores=scores,
         target_composite=target_composite,
         world_model_snapshot=snapshot,
+        winner_local_path=winner_local_path,
     )
 
     if log_path is not None:

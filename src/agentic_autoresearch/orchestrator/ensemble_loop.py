@@ -283,6 +283,15 @@ def _run_one_ensemble_iter(
 
     cfg_name = f"{workflow_template.replace('.json','')}-iter{iter_num:03d}"
     iter_id = f"{run_id}:iter_{iter_num:04d}"
+
+    # Pull winner.webp from the pod's volume for the reflector to read.
+    # RunPod's S3 presigned URLs return 401 (their facade ignores
+    # query-string auth); SCP is the reliable path while the pod is alive.
+    winner_local = iter_local / "winner.webp"
+    winner_remote = str(iter_volume / "winner.webp")
+    rc = _scp_from_pod(pod, winner_remote, winner_local)
+    if rc != 0:
+        print(f"[iter {iter_num}] could not pull winner.webp (rc={rc}); reflector may degrade")
     with WorldModel(project) as wm:
         wm.save_configuration(
             name=cfg_name,
@@ -335,6 +344,7 @@ def _run_one_ensemble_iter(
                 **(stack_entry.get("params") or {})},
         scores=scores,
         target_composite=8.5,
+        winner_local_path=str(winner_local),
         log_path=reflector_log,
     )
     if reflection is None:
@@ -477,7 +487,21 @@ def _ssh(pod: PodHandle, cmd: str, timeout: float = 600.0) -> int:
 
 def _scp_from_pod(pod: PodHandle, remote: str, local: Path) -> int:
     local.parent.mkdir(parents=True, exist_ok=True)
-    full = ["scp"] + _ssh_args(pod) + [f"root@{pod.public_ip}:{remote}", str(local)]
+    # scp uses -P (capital) for port; ssh uses -p (lowercase).
+    # _ssh_args returns "-p PORT" for ssh, so swap to "-P PORT" for scp.
+    args = _ssh_args(pod)
+    scp_args = []
+    skip_next = False
+    for i, a in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "-p" and i + 1 < len(args):
+            scp_args.extend(["-P", args[i + 1]])
+            skip_next = True
+        else:
+            scp_args.append(a)
+    full = ["scp"] + scp_args + [f"root@{pod.public_ip}:{remote}", str(local)]
     res = subprocess.run(full, capture_output=True, text=True, timeout=300)
     if res.returncode != 0:
         print(f"  scp {remote} → {local} FAILED rc={res.returncode}")
