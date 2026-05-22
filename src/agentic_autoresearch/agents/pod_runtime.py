@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -289,12 +290,99 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         pass
 
-    # Wipe /tmp/iter_*/candidates — pod's local disk doesn't keep them
-    # either. Only the volume copy (full-res winner + thumbs) survives.
+    # Wipe /tmp/iter_*/candidates — pod's local disk doesn't keep them.
     shutil.rmtree(candidates, ignore_errors=True)
+
+    # ── S3: upload winner + thumbs to the volume's S3 facade and append
+    # presigned URLs into scores.json so the local reflector can pull them.
+    s3_section = _maybe_s3_publish(
+        output_dir=args.output,
+        volume_runs_root=args.volume_runs_root,
+        s3_endpoint=os.environ.get("AAR_S3_ENDPOINT"),
+        s3_bucket=os.environ.get("AAR_S3_BUCKET"),
+        s3_access_key=os.environ.get("AAR_S3_ACCESS_KEY"),
+        s3_secret_key=os.environ.get("AAR_S3_SECRET_KEY"),
+        s3_region=os.environ.get("AAR_S3_REGION"),
+        s3_key_prefix=os.environ.get("AAR_S3_KEY_PREFIX"),
+    )
+
     print(f"[pod-runtime] done. Mac gets: scores.json + workflow.json only.")
     print(f"[pod-runtime] Volume gets:    {args.volume_runs_root}/winner.webp + thumbs/")
+    if s3_section:
+        print(f"[pod-runtime] S3:             {s3_section.get('winner_url','')[:80]}...")
     return 0
+
+
+def _maybe_s3_publish(*, output_dir: Path, volume_runs_root: Path,
+                       s3_endpoint, s3_bucket, s3_access_key, s3_secret_key,
+                       s3_region, s3_key_prefix) -> dict | None:
+    """Upload winner + thumbs to the volume's S3 facade and append signed URLs
+    into scores.json so the local reflector can pull them.
+
+    Soft-fails: if creds aren't provided or boto3 isn't installed, just skips.
+    The pod still has the files on the volume; the reflector can also
+    SCP them as a fallback path.
+    """
+    if not all([s3_endpoint, s3_bucket, s3_access_key, s3_secret_key, s3_key_prefix]):
+        print(f"[s3] skipping (missing creds or key prefix)")
+        return None
+    try:
+        import boto3
+    except ImportError:
+        print(f"[s3] skipping (boto3 not installed)")
+        return None
+
+    cli = boto3.client(
+        "s3",
+        endpoint_url=s3_endpoint,
+        aws_access_key_id=s3_access_key,
+        aws_secret_access_key=s3_secret_key,
+        region_name=s3_region or "",
+    )
+
+    winner_local = volume_runs_root / "winner.webp"
+    thumbs_dir = volume_runs_root / "thumbs"
+
+    section: dict = {
+        "bucket": s3_bucket,
+        "endpoint": s3_endpoint,
+        "key_prefix": s3_key_prefix.rstrip("/") + "/",
+    }
+
+    def _upload_and_sign(local: Path, key: str) -> str | None:
+        try:
+            cli.upload_file(str(local), s3_bucket, key)
+            return cli.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": s3_bucket, "Key": key},
+                ExpiresIn=86400,  # 24h
+            )
+        except Exception as e:
+            print(f"[s3] upload/sign failed for {key}: {e}")
+            return None
+
+    if winner_local.exists():
+        key = f"{section['key_prefix']}winner.webp"
+        url = _upload_and_sign(winner_local, key)
+        section["winner_key"] = key
+        section["winner_url"] = url
+
+    if thumbs_dir.exists():
+        thumb_entries = []
+        for thumb in sorted(thumbs_dir.glob("*.webp")):
+            key = f"{section['key_prefix']}thumbs/{thumb.name}"
+            url = _upload_and_sign(thumb, key)
+            thumb_entries.append({"name": thumb.stem, "key": key, "url": url})
+        section["thumbs"] = thumb_entries
+
+    # Append into scores.json.
+    scores_path = output_dir / "scores.json"
+    if scores_path.exists():
+        sj = json.loads(scores_path.read_text())
+        sj["s3"] = section
+        scores_path.write_text(json.dumps(sj, indent=2))
+
+    return section
 
 
 if __name__ == "__main__":

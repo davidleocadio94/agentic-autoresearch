@@ -36,6 +36,29 @@ from agentic_autoresearch.paths import pods_file
 
 RUNPOD_REST = "https://rest.runpod.io/v1"
 
+
+# RunPod expects vendor-prefixed full names. Tolerate common short forms
+# in credentials.toml.
+_GPU_ALIASES = {
+    "A40":   "NVIDIA A40",
+    "A100":  "NVIDIA A100 80GB PCIe",
+    "L40":   "NVIDIA L40",
+    "L40S":  "NVIDIA L40S",
+    "L4":    "NVIDIA L4",
+    "A6000": "NVIDIA RTX A6000",
+    "A5000": "NVIDIA RTX A5000",
+    "A4500": "NVIDIA RTX A4500",
+    "A4000": "NVIDIA RTX A4000",
+    "4090":  "NVIDIA GeForce RTX 4090",
+    "5090":  "NVIDIA GeForce RTX 5090",
+    "H100":  "NVIDIA H100 PCIe",
+    "H200":  "NVIDIA H200",
+}
+
+def _normalize_gpu_name(name: str) -> str:
+    """Tolerate short forms ('A40') → canonical ('NVIDIA A40')."""
+    return _GPU_ALIASES.get(name, name)
+
 # Default ComfyUI-friendly image. The actual ComfyUI lives on the network
 # volume; this image just needs the right Python + CUDA + a few utility
 # packages. Override per-call if needed.
@@ -155,6 +178,7 @@ def start_pod(
     """
     if ports is None:
         ports = ["22/tcp", "8188/http"]
+    gpus = [_normalize_gpu_name(g) for g in gpus]
     last_err: Exception | None = None
     handle: PodHandle | None = None
     for gpu in gpus:
@@ -191,8 +215,15 @@ def start_pod(
             break
         except RunPodError as e:
             last_err = e
-            # Capacity-out / unavailable — try next GPU.
-            if "noavail" in str(e).lower() or "no instance" in str(e).lower() or "capacity" in str(e).lower() or "503" in str(e) or "404" in str(e):
+            s = str(e).lower()
+            # Capacity / scheduling shortfalls — try next GPU.
+            capacity_markers = [
+                "noavail", "no instance", "capacity", "503", "404",
+                "could not find any pods", "no pods with required",
+                "not currently available",
+            ]
+            if any(m in s for m in capacity_markers):
+                print(f"  {gpu}: capacity-out, trying next")
                 continue
             # Other errors propagate.
             raise

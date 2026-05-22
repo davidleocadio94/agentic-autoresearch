@@ -129,6 +129,7 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
             ok = _run_one_ensemble_iter(
                 spec=spec, project=project, run_id=run_id, iter_num=iter_num,
                 pod=pod, creds=creds,
+                category=category, parent_name=parent_name,
                 workflow_template=workflow_template,
                 seeds=seeds,
                 iter_local=iter_local,
@@ -160,7 +161,9 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
 
 def _run_one_ensemble_iter(
     spec: ProblemSpec, project: str, run_id: str, iter_num: int,
-    pod: PodHandle, creds, workflow_template: str, seeds: list[int],
+    pod: PodHandle, creds,
+    category: str, parent_name: str | None,
+    workflow_template: str, seeds: list[int],
     iter_local: Path, iter_volume: Path,
 ) -> bool:
     """Submit workflow on pod via pod_runtime.py, wait for results."""
@@ -180,11 +183,39 @@ def _run_one_ensemble_iter(
     seeds_arg = " ".join(str(s) for s in seeds)
     anthropic_key = creds.anthropic.api_key
 
-    cmd = (
+    # S3 env vars for pod_runtime to upload images and generate presigned URLs.
+    # When not configured, pod_runtime soft-fails and the loop falls back to
+    # SCP-on-demand (slower but works).
+    s3_env_prefix = ""
+    if creds.runpod_s3 is not None:
+        from agentic_autoresearch.agents.s3 import endpoint_for
+        s3_endpoint = endpoint_for(creds.runpod.datacenter)
+        s3_region = creds.runpod.datacenter.lower()
+        # iter-level key prefix; reflector will use this verbatim.
+        s3_key_prefix = f"runs/{run_id}/iter_{iter_num:04d}/"
+        s3_env_prefix = (
+            f"AAR_S3_ENDPOINT={s3_endpoint} "
+            f"AAR_S3_BUCKET={creds.runpod.volume_id} "
+            f"AAR_S3_ACCESS_KEY={creds.runpod_s3.access_key} "
+            f"AAR_S3_SECRET_KEY={creds.runpod_s3.secret_key} "
+            f"AAR_S3_REGION={s3_region} "
+            f"AAR_S3_KEY_PREFIX={s3_key_prefix} "
+        )
+
+    # Launch pod_runtime DETACHED on the pod (setsid + redirect all fds), then
+    # poll the iter log for completion sentinel. This avoids ssh sessions
+    # that hang for an hour after pod_runtime exits.
+    iter_log = f"/runpod-volume/runs/{run_id}/iter_{iter_num:04d}.log"
+    rc_file = f"/runpod-volume/runs/{run_id}/iter_{iter_num:04d}.rc"
+    launch_cmd = (
         f"mkdir -p {remote_output} {iter_volume}; "
-        f"cd /runpod-volume/aar/agentic-autoresearch && "
-        f"PYTHONPATH=/runpod-volume/aar/comfyui-experiments:$PYTHONPATH "
-        f"python3 -m agentic_autoresearch.agents.pod_runtime "
+        f"rm -f {rc_file}; "
+        f"(setsid nohup bash -c '"
+        f"  cd /runpod-volume/aar/agentic-autoresearch && "
+        f"  {s3_env_prefix}"
+        f"  PYTHONPATH=/runpod-volume/aar/agentic-autoresearch/src:"
+        f"/runpod-volume/aar/comfyui-experiments:$PYTHONPATH "
+        f"  python3.11 -m agentic_autoresearch.agents.pod_runtime "
         f"  --workflow {remote_workflow} "
         f"  --prompts {remote_prompts} "
         f"  --seeds {seeds_arg} "
@@ -195,12 +226,44 @@ def _run_one_ensemble_iter(
         f"  --output {remote_output} "
         f"  --volume-runs-root {iter_volume} "
         f"  --anthropic-api-key {anthropic_key} "
-        f"> /runpod-volume/runs/{run_id}/iter_{iter_num:04d}.log 2>&1"
+        f"  ; echo $? > {rc_file}"
+        f"' </dev/null >{iter_log} 2>&1 &) && echo launched"
     )
-    print(f"[iter {iter_num}] submitting pod_runtime via ssh")
-    rc = _ssh(pod, cmd, timeout=4 * 3600)
+    print(f"[iter {iter_num}] launching pod_runtime (detached)")
+    rc = _ssh(pod, launch_cmd, timeout=30)
     if rc != 0:
-        print(f"[iter {iter_num}] pod_runtime exit={rc}")
+        print(f"[iter {iter_num}] failed to launch pod_runtime (ssh rc={rc})")
+        return False
+
+    # Poll for the .rc sentinel every 60s, up to 4h.
+    print(f"[iter {iter_num}] polling for completion")
+    deadline = time.monotonic() + 4 * 3600
+    last_progress_log = 0.0
+    while time.monotonic() < deadline:
+        # Fast check via ssh test -f
+        check = _ssh(pod, f"test -f {rc_file} && cat {rc_file}", timeout=15)
+        if check == 0:
+            # cat returned 0 but exit code is in stdout (we couldn't capture
+            # via _ssh which uses subprocess.call). Read with separate command.
+            import subprocess
+            rc_out = subprocess.run(
+                ["ssh"] + _ssh_args(pod) + [f"root@{pod.public_ip}", f"cat {rc_file}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            exit_code = int(rc_out.stdout.strip() or "1")
+            print(f"[iter {iter_num}] pod_runtime exit={exit_code}")
+            if exit_code != 0:
+                print(f"[iter {iter_num}] tailing iter log:")
+                _ssh(pod, f"tail -60 {iter_log} || true", timeout=30)
+                return False
+            break
+        # Progress beat every 60s
+        if time.monotonic() - last_progress_log > 60:
+            _ssh(pod, f"tail -1 {iter_log} 2>/dev/null || true", timeout=15)
+            last_progress_log = time.monotonic()
+        time.sleep(60)
+    else:
+        print(f"[iter {iter_num}] timed out after 4h waiting for {rc_file}")
         return False
 
     # Pull scores.json + workflow.json back to the Mac.
@@ -218,8 +281,9 @@ def _run_one_ensemble_iter(
     composite_std = scores.get("per_signal", {}).get("composite", {}).get("std", 0)
     arcface_mean = scores.get("per_signal", {}).get("arcface_cosine", {}).get("mean", 0)
 
+    cfg_name = f"{workflow_template.replace('.json','')}-iter{iter_num:03d}"
+    iter_id = f"{run_id}:iter_{iter_num:04d}"
     with WorldModel(project) as wm:
-        cfg_name = f"{workflow_template.replace('.json','')}-iter{iter_num:03d}"
         wm.save_configuration(
             name=cfg_name,
             workflow_json=(iter_local / "workflow.json").read_text(),
@@ -235,6 +299,51 @@ def _run_one_ensemble_iter(
         )
         print(f"[iter {iter_num}] saved config '{cfg_name}' "
               f"composite={composite_mean:.3f}±{composite_std:.3f} arcface={arcface_mean:.3f}")
+
+    # Local reflector: claude -p (subscription-auth'd) looks at the winner
+    # via S3 presigned URL, writes structured beliefs to the world model.
+    from agentic_autoresearch.agents.reflector import (
+        dispatch_tool_calls,
+        reflect,
+    )
+    # Load the matching seed.jsonl entry for the workflow used.
+    stack_entry: dict = {}
+    seed_path = spec.repo_path / "references" / "seed.jsonl"
+    if seed_path.exists():
+        for line in seed_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                if Path(e.get("workflow_template", "")).name == workflow_template:
+                    stack_entry = e
+                    break
+            except json.JSONDecodeError:
+                continue
+
+    reflector_log = iter_local / "reflector.log"
+    print(f"[iter {iter_num}] running local reflector (claude -p, subscription)")
+    reflection = reflect(
+        project=project,
+        iter_num=iter_num,
+        iter_id=iter_id,
+        category=category,
+        parent_config=parent_name,
+        stack_entry=stack_entry,
+        params={"workflow_template": workflow_template, "seeds": seeds,
+                **(stack_entry.get("params") or {})},
+        scores=scores,
+        target_composite=8.5,
+        log_path=reflector_log,
+    )
+    if reflection is None:
+        print(f"[iter {iter_num}] reflector returned no result (continuing)")
+    else:
+        (iter_local / "reflection.json").write_text(json.dumps(reflection, indent=2))
+        n = dispatch_tool_calls(project=project, reflection=reflection, iter_id=iter_id)
+        print(f"[iter {iter_num}] reflector → {n} world-model write(s); "
+              f"next_direction: {reflection.get('next_direction')!r}")
     return True
 
 
@@ -242,42 +351,103 @@ def _run_one_ensemble_iter(
 
 
 def _ship_pod_runtime(pod: PodHandle, spec: ProblemSpec) -> None:
-    """rsync the framework + experiment repo onto the pod's volume."""
-    framework = Path(__file__).resolve().parents[2]  # agentic-autoresearch root
+    """Install rsync (if missing), then rsync framework + experiment repo
+    onto the pod's volume."""
+    # parents[0]=orchestrator  [1]=agentic_autoresearch  [2]=src  [3]=repo root
+    framework = Path(__file__).resolve().parents[3]
     experiment = spec.repo_path
+    print(f"[ship] framework root: {framework}")
+    print(f"[ship] experiment root: {experiment}")
 
-    print(f"[ship] rsyncing framework → pod: {framework}")
-    _rsync_to_pod(pod, framework, "/runpod-volume/aar/agentic-autoresearch/")
-    print(f"[ship] rsyncing experiment → pod: {experiment}")
-    _rsync_to_pod(pod, experiment, "/runpod-volume/aar/comfyui-experiments/")
-
-    # Ensure runtime deps installed
-    print(f"[ship] pip install runtime deps")
-    _ssh(pod, "pip install --quiet boto3 pyyaml pillow insightface onnxruntime-gpu "
-              "torch torchvision open_clip_torch mediapipe anthropic huggingface_hub")
-
-
-def _start_comfyui(pod: PodHandle) -> None:
-    """Launch ComfyUI on the pod in the background."""
-    print(f"[comfyui] starting on pod")
-    _ssh(pod, (
-        "cd /runpod-volume/ComfyUI && "
-        "nohup python3 main.py --listen 0.0.0.0 --port 8188 "
-        "> /runpod-volume/comfyui.log 2>&1 & echo started PID=$!"
+    # The runpod/base image doesn't ship rsync — apt-install first.
+    print(f"[ship] ensuring rsync on pod + creating target dirs")
+    rc = _ssh(pod, (
+        "set -e; "
+        "which rsync || (apt-get update -qq && apt-get install -y -qq rsync); "
+        "mkdir -p /runpod-volume/aar/agentic-autoresearch "
+        "         /runpod-volume/aar/comfyui-experiments"
     ))
-    # Wait until ComfyUI's /system_stats endpoint responds.
-    import urllib.request, urllib.error
-    deadline = time.time() + 180
-    proxy_url = pod.comfyui_url + "/system_stats"
+    if rc != 0:
+        raise RuntimeError(f"failed to install rsync / mkdir on pod (exit {rc})")
+
+    print(f"[ship] rsyncing framework → pod ({framework})")
+    rc = _rsync_to_pod(pod, framework, "/runpod-volume/aar/agentic-autoresearch/")
+    if rc != 0:
+        raise RuntimeError(f"rsync framework failed (exit {rc})")
+    print(f"[ship] rsyncing experiment → pod ({experiment})")
+    rc = _rsync_to_pod(pod, experiment, "/runpod-volume/aar/comfyui-experiments/")
+    if rc != 0:
+        raise RuntimeError(f"rsync experiment failed (exit {rc})")
+
+    # CRITICAL: this image has python3 → 3.10 AND python3.11. ComfyUI runs
+    # under 3.11. Install ALL deps into 3.11 so ComfyUI's nodes can import
+    # them. Use python3.11 -m pip explicitly.
+    PIP = "python3.11 -m pip install --quiet"
+    print(f"[ship] pip(3.11) install ComfyUI requirements + custom-node deps")
+    rc = _ssh(pod,
+        f"{PIP} -r /runpod-volume/ComfyUI/requirements.txt && "
+        f"{PIP} facexlib insightface onnxruntime-gpu timm einops ftfy",
+        timeout=600,
+    )
+    if rc != 0:
+        print(f"[ship] WARNING: ComfyUI pip returned {rc}")
+
+    # Then framework runtime deps (eval pipeline). Also into 3.11 so the
+    # pod_runtime invocation can import everything. boto3 is needed for the
+    # S3-API publish step.
+    print(f"[ship] pip(3.11) install eval pipeline deps")
+    rc = _ssh(pod,
+        f"{PIP} boto3 pyyaml pillow open_clip_torch mediapipe huggingface_hub",
+        timeout=600,
+    )
+    if rc != 0:
+        print(f"[ship] WARNING: eval pip returned {rc}; continuing anyway")
+
+    # Copy reference images into ComfyUI/input/ so LoadImage nodes can find
+    # them by basename (identity.png, brooke_*.png).
+    print(f"[ship] copying references into ComfyUI/input/")
+    _ssh(pod,
+        "mkdir -p /runpod-volume/ComfyUI/input && "
+        "cp /runpod-volume/aar/comfyui-experiments/eval/references/identity.png "
+        "   /runpod-volume/ComfyUI/input/ && "
+        "cp /runpod-volume/aar/comfyui-experiments/eval/references/visible/*.png "
+        "   /runpod-volume/ComfyUI/input/ 2>/dev/null || true && "
+        "cp /runpod-volume/aar/comfyui-experiments/eval/references/held_out/*.png "
+        "   /runpod-volume/ComfyUI/input/ 2>/dev/null || true && "
+        "ls /runpod-volume/ComfyUI/input/")
+
+
+def _start_comfyui(pod: PodHandle, timeout_seconds: float = 600.0) -> None:
+    """Launch ComfyUI on the pod in the background. Probe localhost via
+    SSH (Cloudflare proxy has its own warmup latency we don't want to fight)."""
+    print(f"[comfyui] starting on pod")
+    # Critical: fully detach from the SSH session. `nohup ... &` is not
+    # enough — SSH still waits because stdout/stderr are tied to the
+    # session's pty. Redirect ALL fds and disown.
+    # Kill any prior ComfyUI on the pod (stale process across runs).
+    _ssh(pod, "pkill -f 'python.*main.py.*--listen' 2>/dev/null; true", timeout=10)
+    _ssh(pod,
+        "cd /runpod-volume/ComfyUI && "
+        "(setsid nohup python3.11 main.py --listen 0.0.0.0 --port 8188 "
+        " </dev/null >/runpod-volume/comfyui.log 2>&1 &) && "
+        "echo 'launched'",
+        timeout=30,
+    )
+    deadline = time.time() + timeout_seconds
+    last = 0.0
     while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(proxy_url, timeout=10) as r:
-                if r.status == 200:
-                    print(f"[comfyui] reachable at {pod.comfyui_url}")
-                    return
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-            time.sleep(5)
-    print(f"[comfyui] WARNING: not reachable after 3 min — may still be loading models")
+        # Probe FROM the pod itself — bypasses Cloudflare 524 nonsense.
+        rc = _ssh(pod, "curl --max-time 5 -sf http://127.0.0.1:8188/system_stats > /dev/null", timeout=20)
+        if rc == 0:
+            print(f"[comfyui] reachable on pod localhost:8188 (proxy: {pod.comfyui_url})")
+            return
+        if time.time() - last > 30:
+            print(f"[comfyui] still booting ({int(time.time() - (deadline - timeout_seconds))}s elapsed)")
+            last = time.time()
+        time.sleep(10)
+    # Don't fail run — pod_runtime will fail fast with a clear error
+    print(f"[comfyui] WARNING: not reachable after {int(timeout_seconds)}s. last 30 log lines:")
+    _ssh(pod, "tail -30 /runpod-volume/comfyui.log || true")
 
 
 # ─── ssh / scp / rsync helpers ──────────────────────────────────────
@@ -290,6 +460,11 @@ def _ssh_args(pod: PodHandle) -> list[str]:
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=ERROR",
+        # Keep-alive + dead-peer detection so long iter SSH sessions
+        # don't hang silently when the RunPod proxy goes stale.
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=4",
+        "-o", "TCPKeepAlive=yes",
         "-i", str(Path.home() / ".ssh" / "id_ed25519"),
         "-p", str(pod.ssh_port),
     ]
@@ -303,19 +478,44 @@ def _ssh(pod: PodHandle, cmd: str, timeout: float = 600.0) -> int:
 def _scp_from_pod(pod: PodHandle, remote: str, local: Path) -> int:
     local.parent.mkdir(parents=True, exist_ok=True)
     full = ["scp"] + _ssh_args(pod) + [f"root@{pod.public_ip}:{remote}", str(local)]
-    return subprocess.call(full, timeout=300)
+    res = subprocess.run(full, capture_output=True, text=True, timeout=300)
+    if res.returncode != 0:
+        print(f"  scp {remote} → {local} FAILED rc={res.returncode}")
+        if res.stderr:
+            print(f"  stderr: {res.stderr.strip()[:300]}")
+    return res.returncode
 
 
 def _rsync_to_pod(pod: PodHandle, local: Path, remote: str) -> int:
     ssh_cmd = "ssh " + " ".join(_ssh_args(pod))
     full = [
-        "rsync", "-az",
-        "--exclude=__pycache__", "--exclude=.venv", "--exclude=.git",
-        "--exclude=.aar", "--exclude=.agentic-autoresearch-worktrees",
+        "rsync", "-az", "--no-perms", "--no-owner", "--no-group",
+        "--exclude=__pycache__", "--exclude=.venv", "--exclude=venv",
+        "--exclude=.git", "--exclude=.aar",
+        "--exclude=.agentic-autoresearch-worktrees",
+        "--exclude=*.pyc", "--exclude=node_modules",
+        "--exclude=.pytest_cache", "--exclude=.ruff_cache",
+        # ensure target dir exists on pod
+        "--mkpath" if _rsync_supports_mkpath() else "",
         "-e", ssh_cmd,
         str(local).rstrip("/") + "/", f"root@{pod.public_ip}:{remote}",
     ]
+    full = [arg for arg in full if arg]
     return subprocess.call(full, timeout=900)
+
+
+def _rsync_supports_mkpath() -> bool:
+    """rsync 3.2.3+ supports --mkpath; older versions silently fail with no
+    target. Test once."""
+    try:
+        out = subprocess.run(["rsync", "--version"], capture_output=True, text=True, timeout=5)
+        first = (out.stdout or "").splitlines()[0]
+        # "rsync  version 3.2.7  protocol version 31"
+        ver = first.split()[2] if len(first.split()) >= 3 else "0"
+        major, minor, *_ = (int(x) for x in ver.split(".") + ["0"]) if "." in ver else (0, 0)
+        return (major, minor) >= (3, 2)
+    except Exception:
+        return False
 
 
 # ─── iter selection + world-model queries ───────────────────────────
