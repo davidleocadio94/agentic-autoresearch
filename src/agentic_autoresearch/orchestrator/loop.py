@@ -229,6 +229,38 @@ def _run_one_iter(spec: ProblemSpec, run_id: str, iter_num: int, score_before: f
     store.add_artifact(iter_id, "actor_log", path=actor_log)
     actor_report = parse_json_block(actor_res.final_message or "") or {}
 
+    # --- ASYNC-ACT BRANCH ---------------------------------------------------
+    # If the actor wrote pending_job.json, suspend the iteration and poll for
+    # results. The actor process has already exited; we're just watching disk.
+    from agentic_autoresearch.orchestrator.awaiting_remote import (
+        clear_pending,
+        has_pending_job,
+        read_remote_results,
+        wait_for_results,
+    )
+    if has_pending_job(repo):
+        store.set_phase(iter_id, "awaiting_remote")
+        wait_result = wait_for_results(repo, poll_interval=300.0)
+        if wait_result["status"] != "ok":
+            store.finalize_iteration(
+                iter_id,
+                phase=f"failed_remote_{wait_result['status']}",
+                kept=None,
+                score_after=None,
+                per_fixture_scores=None,
+                lesson=f"remote job did not complete: {wait_result['status']}",
+                proposed_next=None,
+                commit_hash=None,
+                duration_seconds=int(time.monotonic() - started),
+            )
+            clear_pending(repo)
+            return score_before
+        # Pull scores.json from the results dir into eval_output so the
+        # rest of the iter is unchanged.
+        remote = read_remote_results(wait_result["results_dir"])
+        eval_output.write_text(json.dumps(remote))
+        clear_pending(repo)
+
     # Read the actor's eval output. If missing, re-run.
     score_after = None
     if eval_output.exists():
