@@ -42,35 +42,36 @@ from pathlib import Path
 COMFYUI_URL = "http://127.0.0.1:8188"
 
 
-def submit_workflow(workflow: dict, prompt_text: str, negative: str, seed: int,
-                    prompt_node_id: str = "6", negative_node_id: str | None = None,
-                    seed_node_id: str | None = None) -> str:
-    """Patch the workflow with prompt/seed/negative and submit. Returns prompt_id.
+def render_template(template_text: str, params: dict) -> dict:
+    """Workflows in workflows/*.json are TEMPLATES with {param} placeholders
+    (e.g. {prompt}, {seed}, {cfg}, {id_weight}, {checkpoint}, ...). This
+    fn substitutes the params and parses to JSON.
 
-    Node IDs are workflow-specific. The actor's job is to provide a
-    workflow where these IDs are documented. Until then, this fn assumes
-    the canonical Mickmumpitz / Apatero layouts.
+    Critically: it uses regex substitution rather than str.format() so
+    that JSON braces (`{`, `}`) inside string values don't blow up.
     """
-    wf = dict(workflow)  # shallow copy of top-level
-    nodes = json.loads(json.dumps(wf.get("nodes") or wf.get("prompt") or {}))
+    import re
+    out = template_text
+    for k, v in params.items():
+        # JSON-encode the value to handle strings, numbers, booleans
+        # correctly. Strip outer quotes for numeric placeholders that
+        # were written like {cfg} (no quotes) but keep them for string
+        # placeholders that were written like "{prompt}" (in quotes).
+        encoded = json.dumps(v)
+        # Replace "{k}" (in quotes) first — the placeholder was meant
+        # as a string literal.
+        out = re.sub(r'"\{' + re.escape(k) + r'\}"', encoded, out)
+        # Then bare {k} for numeric/raw placeholders.
+        if isinstance(v, str):
+            # for raw {k} of a string value, JSON-encode (adds quotes).
+            out = re.sub(r'\{' + re.escape(k) + r'\}', encoded, out)
+        else:
+            out = re.sub(r'\{' + re.escape(k) + r'\}', encoded, out)
+    return json.loads(out)
 
-    # Patch prompt text
-    if prompt_node_id and prompt_node_id in nodes:
-        try:
-            nodes[prompt_node_id]["inputs"]["text"] = prompt_text
-        except (KeyError, TypeError):
-            pass
-    if negative_node_id and negative_node_id in nodes:
-        try:
-            nodes[negative_node_id]["inputs"]["text"] = negative
-        except (KeyError, TypeError):
-            pass
-    if seed_node_id and seed_node_id in nodes:
-        try:
-            nodes[seed_node_id]["inputs"]["seed"] = seed
-        except (KeyError, TypeError):
-            pass
 
+def submit_workflow_dict(nodes: dict) -> str:
+    """Submit an already-rendered workflow node dict to ComfyUI."""
     payload = {"prompt": nodes, "client_id": str(uuid.uuid4())}
     req = urllib.request.Request(
         f"{COMFYUI_URL}/prompt",
@@ -119,23 +120,54 @@ def run_batch(
     prompts_path: Path,
     seeds: list[int],
     candidates_dir: Path,
+    extra_params: dict | None = None,
+    identity_image_filename: str = "identity.png",
 ) -> list[Path]:
-    """Submit (prompt × seed) jobs and gather candidate PNGs."""
-    workflow = json.loads(workflow_path.read_text())
+    """Submit (prompt × seed) jobs and gather candidate PNGs.
+
+    The workflow file is a TEMPLATE — render_template substitutes
+    {prompt}, {seed}, {cfg}, {width}, {height}, {id_weight},
+    {face_image}, etc. The actor supplies extra_params for any
+    non-default knobs.
+    """
+    template_text = workflow_path.read_text()
     prompts_doc = json.loads(prompts_path.read_text())
     prompts = prompts_doc["prompts"]
 
+    defaults = {
+        "width": 1024,
+        "height": 1024,
+        "steps": 30,
+        "cfg": 4.5,
+        "id_weight": 0.85,
+        "lora_strength": 0.7,
+        "lora_name": "",
+        "checkpoint": "realvisxlV50_v50LightningBakedvae.safetensors",
+        "face_image": identity_image_filename,
+        "negative_prompt": "",
+    }
+    if extra_params:
+        defaults.update(extra_params)
+
     candidates_dir.mkdir(parents=True, exist_ok=True)
-    submitted: list[tuple[str, str, int]] = []  # (prompt_id, name, seed)
+    submitted: list[tuple[str, str, int]] = []
     for p in prompts:
         for seed in seeds:
             name = f"{p['id']}_s{seed}"
-            pid = submit_workflow(
-                workflow=workflow,
-                prompt_text=p["text"],
-                negative=p.get("negative", ""),
-                seed=seed,
-            )
+            params = dict(defaults)
+            params["prompt"] = p["text"]
+            params["negative_prompt"] = p.get("negative", "")
+            params["seed"] = seed
+            try:
+                nodes = render_template(template_text, params)
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"  {name}: render_template failed: {e}", file=sys.stderr)
+                continue
+            try:
+                pid = submit_workflow_dict(nodes)
+            except Exception as e:
+                print(f"  {name}: submit failed: {e}", file=sys.stderr)
+                continue
             submitted.append((pid, name, seed))
             print(f"  submitted {name} → prompt_id={pid}")
 
