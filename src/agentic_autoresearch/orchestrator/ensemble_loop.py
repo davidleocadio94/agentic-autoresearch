@@ -110,10 +110,31 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
         # Run iterations until target / budget / plateau.
         iters_root = project_dir(project) / "iters"
         plateau_count = 0
-        plateau_research_threshold = 3  # iters w/o improvement → researcher
         plateau_threshold = 5           # iters w/o improvement → stop
-        researcher_fired = False        # one researcher invocation per run
         last_best = 0.0
+        RESEARCHER_EVERY_N_ITERS = 5    # ambient research cadence
+
+        # Run researcher ONCE at startup so the planner has fresh
+        # external_claim beliefs before iter 1 fires.
+        from agentic_autoresearch.agents.researcher import (
+            research as run_researcher,
+            validate_and_register_workflows,
+        )
+        print(f"[ensemble] startup researcher run (claude -p, subscription)")
+        try:
+            rsrch_log = iters_root / "researcher_startup.log"
+            result = run_researcher(
+                project=project, experiment_repo=spec.repo_path,
+                iters_root=iters_root, log_path=rsrch_log,
+            )
+            if result is not None:
+                registered = validate_and_register_workflows(
+                    parsed=result, experiment_repo=spec.repo_path, project=project,
+                )
+                print(f"[ensemble] startup researcher → added {len(registered)} workflow(s); "
+                      f"summary: {result.get('summary','')[:200]}")
+        except Exception as e:
+            print(f"[ensemble] startup researcher errored: {e!r}")
         from agentic_autoresearch.agents.planner_ensemble import plan as plan_iter
 
         iter_num = 0
@@ -160,6 +181,32 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                     print(f"[planner] config_changes: {config_changes}")
                     print(f"[planner] rationale: {hyp.get('rationale','')[:200]}")
 
+                    # Planner-requested research: if the planner emitted
+                    # `needs_research`, fire the researcher BEFORE this
+                    # iter runs. New workflows it produces are available
+                    # in seed.jsonl + world model immediately.
+                    nr = hyp.get("needs_research")
+                    if nr and isinstance(nr, str) and nr.strip().lower() not in ("", "null", "none"):
+                        print(f"[ensemble] PLANNER asks for research: {nr[:200]}")
+                        try:
+                            rsrch_log = iter_dir(project, iter_num) / "researcher_planner_request.log"
+                            result = run_researcher(
+                                project=project, experiment_repo=spec.repo_path,
+                                iters_root=iters_root, log_path=rsrch_log,
+                                planner_question=nr,
+                            )
+                            if result is not None:
+                                (iter_dir(project, iter_num) / "research_planner_request.json").write_text(
+                                    json.dumps(result, indent=2)
+                                )
+                                registered = validate_and_register_workflows(
+                                    parsed=result, experiment_repo=spec.repo_path, project=project,
+                                )
+                                print(f"[ensemble] planner-req research → +{len(registered)} workflow(s); "
+                                      f"{result.get('summary','')[:160]}")
+                        except Exception as e:
+                            print(f"[ensemble] planner-req research errored: {e!r}")
+
             seeds = [_rand_seed() for _ in range(seeds_per)]
 
             print(f"\n[ensemble] === ITER {iter_num} ===")
@@ -189,52 +236,41 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                       f"arcface={best['arcface']}")
                 break
 
-            # Plateau detection. Two thresholds:
-            #   plateau_research_threshold (=3): wake the researcher
-            #   plateau_threshold          (=5): stop the loop
-            # The researcher gets ONE shot per run; if it can't unstuck
-            # us, plateau→stop still fires.
+            # Plateau detection (composite improvement tracking).
             current_best = best.get("composite", 0.0) if best else 0.0
             if current_best > last_best * 1.01:
                 plateau_count = 0
                 last_best = current_best
             else:
                 plateau_count += 1
-                if (plateau_count == plateau_research_threshold
-                        and not researcher_fired):
-                    researcher_fired = True
-                    print(f"[ensemble] PLATEAU (research trigger): "
-                          f"{plateau_count} iters without improvement → "
-                          f"firing researcher agent")
-                    try:
-                        from agentic_autoresearch.agents.researcher import (
-                            research, validate_and_register_workflows,
-                        )
-                        rsrch_log = iter_dir(project, iter_num) / "researcher.log"
-                        result = research(
-                            project=project,
-                            experiment_repo=spec.repo_path,
-                            iters_root=iters_root,
-                            log_path=rsrch_log,
-                        )
-                        if result is None:
-                            print(f"[ensemble] researcher returned no result")
-                        else:
-                            (iter_dir(project, iter_num) / "research.json").write_text(
-                                json.dumps(result, indent=2)
-                            )
-                            registered = validate_and_register_workflows(
-                                parsed=result,
-                                experiment_repo=spec.repo_path,
-                                project=project,
-                            )
-                            print(f"[ensemble] researcher → added {len(registered)} workflow(s); "
-                                  f"summary: {result.get('summary','')[:200]}")
-                    except Exception as e:
-                        print(f"[ensemble] researcher errored: {e!r}")
                 if plateau_count >= plateau_threshold:
                     print(f"[ensemble] PLATEAU: {plateau_count} iters with no improvement; stopping")
                     break
+
+            # Ambient research: every N iters, fire a research pass with
+            # the world model's current blockers. The researcher constructs
+            # its own queries from belief state — no hardcoded query list.
+            if iter_num % RESEARCHER_EVERY_N_ITERS == 0:
+                print(f"[ensemble] ambient research (every {RESEARCHER_EVERY_N_ITERS} iters)")
+                try:
+                    rsrch_log = iter_dir(project, iter_num) / "researcher_ambient.log"
+                    result = run_researcher(
+                        project=project,
+                        experiment_repo=spec.repo_path,
+                        iters_root=iters_root,
+                        log_path=rsrch_log,
+                    )
+                    if result is not None:
+                        (iter_dir(project, iter_num) / "research.json").write_text(
+                            json.dumps(result, indent=2)
+                        )
+                        registered = validate_and_register_workflows(
+                            parsed=result, experiment_repo=spec.repo_path, project=project,
+                        )
+                        print(f"[ensemble] ambient research → +{len(registered)} workflow(s); "
+                              f"{result.get('summary','')[:160]}")
+                except Exception as e:
+                    print(f"[ensemble] ambient research errored: {e!r}")
 
     finally:
         if pod and opts.stop_pod_after:

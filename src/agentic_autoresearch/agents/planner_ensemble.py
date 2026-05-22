@@ -110,9 +110,16 @@ OUTPUT — single JSON object, fenced ```json ... ```:
   "parent_config": "<config name or null>",
   "workflow_template": "<filename from AVAILABLE WORKFLOW TEMPLATES>",
   "cites": ["belief:<id>", "config:<id>", "intuition:<id>"],
-  "expected_delta": "<short phrase like '+0.05 arcface'>"
+  "expected_delta": "<short phrase like '+0.05 arcface'>",
+  "needs_research": "<null OR a specific question for the researcher>"
 }}
 ```
+
+When `needs_research` is set, the framework runs a researcher pass
+BEFORE submitting this iter. Use it when the workflows you have can't
+deliver what your hypothesis requires (e.g. you want FaceDetailer but
+no current workflow has that node). The researcher may add a new
+workflow_template you can pick on a subsequent iter.
 """
 
 

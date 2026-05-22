@@ -101,15 +101,26 @@ YOUR JOB
    (e.g. "we have Flux+PuLID but no second-pass FaceDetailer node
     wired in; the loop wants one").
 
-2. Use WebSearch + WebFetch (cap yourself at ~{max_searches} total
-   searches; quality over quantity) to find:
-   - workflow JSONs from creators / sharing platforms
-   - papers / techniques that address the specific failure mode
-   - new model checkpoints worth trying (cite source)
+2. CONSTRUCT YOUR OWN SEARCH QUERIES from the blockers above. Don't
+   use a fixed query list — derive specific, narrow queries from
+   what's actually missing. Examples of GOOD queries:
 
-   Good sources: r/StableDiffusion, r/comfyui, civitai workflows,
-   runcomfy, myaiforce, apatero, openart.ai, comfyworkflows.com,
-   arxiv ai-art, github (search "comfyui workflow").
+      "ComfyUI FaceDetailer Impact Pack workflow PuLID Flux"
+      "Flux face-detailer second-pass 2026 site:civitai.com"
+      "Duchenne smile prompt ComfyUI 2026 reddit"
+
+   Examples of BAD queries (too broad):
+      "character consistency"
+      "ComfyUI workflow"
+
+   Use WebSearch + WebFetch. Cap yourself at ~{max_searches} total
+   searches; quality over quantity. The framework prefers these
+   domains (per the experiment's source registry):
+
+{preferred_domains_block}
+
+   You don't HAVE to stay on those — discover new sources too — but
+   weight them higher when ranking results.
 
 3. For each new workflow you want to add:
    - It must be a TEMPLATE (with placeholders like {{prompt}},
@@ -239,18 +250,45 @@ def _format_directions(iters_root: Path, n: int = 4) -> str:
     return "\n".join(f"  iter_{n:04d}: {d}" for n, d in items[:n] if d) or "  (none)"
 
 
+def _format_preferred_domains(experiment_repo: Path) -> str:
+    sources = experiment_repo / "sources.yaml"
+    if not sources.exists():
+        return "  (no preferred domains configured)"
+    import yaml
+    try:
+        cfg = yaml.safe_load(sources.read_text()) or {}
+    except Exception:
+        return "  (sources.yaml malformed)"
+    domains = cfg.get("researcher_preferred_domains") or []
+    return "\n".join(f"  - {d}" for d in domains) or "  (none configured)"
+
+
 def research(*, project: str, experiment_repo: Path, iters_root: Path,
-             log_path: Path | None = None) -> dict | None:
-    """Spawn claude -p researcher. Returns parsed JSON output or None."""
+             log_path: Path | None = None,
+             planner_question: str | None = None) -> dict | None:
+    """Spawn claude -p researcher. Returns parsed JSON output or None.
+
+    `planner_question` (optional): a specific research question the
+    planner emitted via its needs_research field. When provided, the
+    researcher prioritizes answering this over the general blockers list.
+    """
+    blockers_block = _format_blockers(project)
+    if planner_question:
+        blockers_block = (
+            f"  *** PLANNER EXPLICITLY ASKS: {planner_question} ***\n"
+            f"  (Treat this as the top priority. Other blockers below for context.)\n\n"
+            + blockers_block
+        )
     prompt = RESEARCHER_PROMPT_TEMPLATE.format(
         best_config_block=_format_best_config(project),
         workflows_block=_format_workflows(experiment_repo),
-        blockers_block=_format_blockers(project),
+        blockers_block=blockers_block,
         recent_directions_block=_format_directions(iters_root),
         learned_block=_format_learned(project),
         existing_externals_block=_format_external_claims(project),
         experiment_repo=str(experiment_repo),
         max_searches=RESEARCHER_MAX_SEARCHES,
+        preferred_domains_block=_format_preferred_domains(experiment_repo),
     )
 
     if log_path is not None:

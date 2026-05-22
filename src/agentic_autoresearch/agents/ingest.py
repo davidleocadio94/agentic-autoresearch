@@ -124,6 +124,69 @@ def _xml_first(blob: str, tag: str) -> str | None:
     return m.group(1) if m else None
 
 
+def fetch_github_topic(topic: str, max_results: int = 10,
+                        since_days: int = 60) -> list[IngestItem]:
+    """GitHub's REST API search-by-topic. No auth needed for read (60/hr
+    unauth rate limit; bump with a token if needed). Returns one
+    IngestItem per repo."""
+    cutoff = time.time() - since_days * 86400
+    q = urllib.parse.quote(f"topic:{topic} pushed:>{dt.datetime.utcfromtimestamp(cutoff).strftime('%Y-%m-%d')}")
+    url = f"https://api.github.com/search/repositories?q={q}&sort=updated&per_page={max_results}"
+    try:
+        raw = _http(url, headers={"Accept": "application/vnd.github+json"})
+        data = json.loads(raw)
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        return []
+    out: list[IngestItem] = []
+    for r in (data.get("items") or [])[:max_results]:
+        desc = (r.get("description") or "")[:1500]
+        body = (
+            f"GitHub repo {r.get('full_name')}\n"
+            f"stars: {r.get('stargazers_count')}, updated: {r.get('updated_at')}\n"
+            f"description: {desc}"
+        )
+        out.append(IngestItem(
+            title=f"{r.get('full_name')} — {desc[:80]}",
+            body=body,
+            url=r.get("html_url") or "",
+            source="github",
+            posted_at=r.get("updated_at"),
+        ))
+    return out
+
+
+def fetch_civitai(query: str, types: list[str] | None = None,
+                  max_results: int = 15) -> list[IngestItem]:
+    """CivitAI's models API. types can be ['Workflows', 'LORA', 'Checkpoint', ...].
+    No auth needed for read."""
+    types = types or ["Workflows"]
+    q = urllib.parse.quote(query)
+    types_q = "&".join(f"types={urllib.parse.quote(t)}" for t in types)
+    url = f"https://civitai.com/api/v1/models?query={q}&{types_q}&limit={max_results}&sort=Newest"
+    try:
+        raw = _http(url, headers={"Accept": "application/json"})
+        data = json.loads(raw)
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+        return []
+    out: list[IngestItem] = []
+    for m in (data.get("items") or [])[:max_results]:
+        stats = m.get("stats") or {}
+        body = (
+            f"CivitAI {m.get('type')} #{m.get('id')}: {m.get('name','')}\n"
+            f"downloads: {stats.get('downloadCount')}, "
+            f"thumbsUp: {stats.get('thumbsUpCount')}\n"
+            f"description: {(m.get('description') or '')[:1500]}"
+        )
+        out.append(IngestItem(
+            title=f"civitai:{m.get('type')}:{m.get('name','')}",
+            body=body,
+            url=f"https://civitai.com/models/{m.get('id')}",
+            source="civitai",
+            posted_at=m.get("updatedAt"),
+        ))
+    return out
+
+
 def fetch_web(url: str, max_chars: int = 6000) -> list[IngestItem]:
     """One-page fetch. Returns one item with stripped text."""
     try:
@@ -184,11 +247,13 @@ def ingest_from_sources(sources_yaml: Path, project: str, dry_run: bool = False,
     summary: dict[str, int] = {}
 
     if "reddit" in cfg:
+        # Tolerate both old `query` and new `startup_query` field names.
+        reddit_query = cfg["reddit"].get("startup_query") or cfg["reddit"].get("query")
         for sub in cfg["reddit"].get("subs", []):
             try:
                 fetched = fetch_reddit(
                     sub,
-                    query=cfg["reddit"].get("query"),
+                    query=reddit_query,
                     limit=cfg["reddit"].get("limit", 25),
                     since_days=cfg["reddit"].get("since_days", 90),
                 )
@@ -201,7 +266,8 @@ def ingest_from_sources(sources_yaml: Path, project: str, dry_run: bool = False,
                 if verbose:
                     print(f"  reddit/{sub}: FAIL {type(e).__name__}: {e}")
     if "arxiv" in cfg:
-        for q in cfg["arxiv"].get("queries", []):
+        arxiv_queries = cfg["arxiv"].get("startup_queries") or cfg["arxiv"].get("queries", [])
+        for q in arxiv_queries:
             try:
                 fetched = fetch_arxiv(
                     q,
@@ -228,6 +294,40 @@ def ingest_from_sources(sources_yaml: Path, project: str, dry_run: bool = False,
                 summary[f"web:{u}"] = 0
                 if verbose:
                     print(f"  web/{u}: FAIL {e}")
+    if "github" in cfg:
+        topics = cfg["github"].get("startup_topics") or cfg["github"].get("topics", [])
+        for topic in topics:
+            try:
+                fetched = fetch_github_topic(
+                    topic,
+                    max_results=cfg["github"].get("max_per_topic", 10),
+                    since_days=cfg["github"].get("last_updated_within_days", 60),
+                )
+                items.extend(fetched)
+                summary[f"github:{topic}"] = len(fetched)
+                if verbose:
+                    print(f"  github/{topic}: {len(fetched)} repos")
+            except Exception as e:
+                summary[f"github:{topic}"] = 0
+                if verbose:
+                    print(f"  github/{topic}: FAIL {type(e).__name__}: {e}")
+    if "civitai" in cfg:
+        terms = cfg["civitai"].get("startup_query_terms") or cfg["civitai"].get("query_terms", [])
+        for q in terms:
+            try:
+                fetched = fetch_civitai(
+                    q,
+                    types=cfg["civitai"].get("types"),
+                    max_results=cfg["civitai"].get("max_results", 15),
+                )
+                items.extend(fetched)
+                summary[f"civitai:{q}"] = len(fetched)
+                if verbose:
+                    print(f"  civitai/{q!r}: {len(fetched)} item(s)")
+            except Exception as e:
+                summary[f"civitai:{q}"] = 0
+                if verbose:
+                    print(f"  civitai/{q!r}: FAIL {e}")
 
     if dry_run:
         return {"summary": summary, "items_total": len(items)}
