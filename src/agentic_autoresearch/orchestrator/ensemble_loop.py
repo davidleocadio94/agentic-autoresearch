@@ -336,6 +336,10 @@ def _run_one_ensemble_iter(
             f"AAR_S3_KEY_PREFIX={s3_key_prefix} "
         )
 
+    # Before submitting, check whether this workflow needs custom nodes
+    # the pod doesn't have. Install + restart ComfyUI if so.
+    _ensure_nodes_installed(pod, spec.repo_path / "workflows" / workflow_template)
+
     # Launch pod_runtime DETACHED on the pod (setsid + redirect all fds), then
     # poll the iter log for completion sentinel. This avoids ssh sessions
     # that hang for an hour after pod_runtime exits.
@@ -561,6 +565,54 @@ def _ship_pod_runtime(pod: PodHandle, spec: ProblemSpec) -> None:
         "cp /runpod-volume/aar/comfyui-experiments/eval/references/held_out/*.png "
         "   /runpod-volume/ComfyUI/input/ 2>/dev/null || true && "
         "ls /runpod-volume/ComfyUI/input/")
+
+
+def _ensure_nodes_installed(pod: PodHandle, workflow_path: Path) -> None:
+    """If the workflow uses custom_nodes we haven't installed, clone+pip them.
+    Restarts ComfyUI on the pod if any new node was installed."""
+    from agentic_autoresearch.agents.ensure_nodes import (
+        BUILTIN_NODES, NODE_CATALOG, install_script, missing_nodes,
+    )
+    if not workflow_path.exists():
+        return
+    installable, unknown = missing_nodes(workflow_path)
+    if unknown:
+        print(f"[ensure_nodes] WARNING: workflow uses unknown nodes (no catalog entry): {unknown}. "
+              f"They won't get installed; ComfyUI will reject the prompt.")
+    if not installable:
+        return  # all needed nodes are vanilla or already known-installed
+    # Check pod-side which are actually missing
+    have_check = " && ".join(
+        f"[ -d /runpod-volume/ComfyUI/custom_nodes/{NODE_CATALOG[c][1]} ]"
+        for c in installable
+    )
+    rc = _ssh(pod, have_check, timeout=15)
+    if rc == 0:
+        return  # all already present
+    print(f"[ensure_nodes] installing/updating custom_nodes for: {sorted(installable)}")
+    script = install_script(installable)
+    # write to /tmp + run
+    import shlex
+    rc = _ssh(pod, f"cat > /tmp/ensure_nodes.sh <<'EOF'\n{script}\nEOF\nbash /tmp/ensure_nodes.sh",
+              timeout=600)
+    if rc != 0:
+        print(f"[ensure_nodes] install failed rc={rc}; continuing anyway")
+        return
+    # Restart ComfyUI so it picks up new nodes
+    print(f"[ensure_nodes] restarting ComfyUI to load new nodes")
+    _ssh(pod, "pkill -f 'main.py --listen' 2>/dev/null; sleep 2; "
+              "cd /runpod-volume/ComfyUI && "
+              "(setsid nohup python3.11 main.py --listen 0.0.0.0 --port 8188 "
+              "</dev/null >/runpod-volume/comfyui.log 2>&1 &) && echo restarted",
+              timeout=30)
+    # Wait for it
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        if _ssh(pod, "curl --max-time 5 -sf http://127.0.0.1:8188/system_stats >/dev/null", timeout=20) == 0:
+            print(f"[ensure_nodes] ComfyUI back up")
+            return
+        time.sleep(10)
+    print(f"[ensure_nodes] WARNING: ComfyUI didn't come back up cleanly")
 
 
 def _start_comfyui(pod: PodHandle, timeout_seconds: float = 600.0) -> None:
