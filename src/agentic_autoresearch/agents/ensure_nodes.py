@@ -55,17 +55,12 @@ NODE_CATALOG: dict[str, tuple[str, str, str | None]] = {
     "Image Filter Adjustments":     ("https://github.com/WASasquatch/was-node-suite-comfyui",
                                       "was-node-suite-comfyui", "requirements.txt"),
 
-    # InfuseNet — alt identity preservation method, often paired with Flux
-    "InfuseNetApply":               ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
-                                      "ComfyUI_InfuseNet", "requirements.txt"),
-    "InfuseNetLoader":              ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
-                                      "ComfyUI_InfuseNet", "requirements.txt"),
-    "IDEmbeddingModelLoader":       ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
-                                      "ComfyUI_InfuseNet", "requirements.txt"),
-    "ExtractIDEmbedding":           ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
-                                      "ComfyUI_InfuseNet", "requirements.txt"),
-    "ExtractFacePoseImage":         ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
-                                      "ComfyUI_InfuseNet", "requirements.txt"),
+    # InfuseNet — InfiniteYou-style identity preservation. As of 2026 there's
+    # no canonical ComfyUI custom_node for it; researcher should propose
+    # workflows that use it only if it actually finds a working repo. If
+    # cited without a repo, the workflow will fail at submit time + get
+    # blacklisted. Catalog entries below intentionally OMITTED; let the
+    # ComfyUI rejection be the signal.
 
     # InstantID
     "InstantIDLoader":              ("https://github.com/cubiq/ComfyUI_InstantID",
@@ -165,14 +160,23 @@ def install_script(installable_nodes: set[str]) -> str:
         url, dirname, req = NODE_CATALOG[cls]
         repos[dirname] = (url, req)
 
+    # Intentionally NO `set -e`: one bad clone (404, network blip,
+    # auth required) must NOT abort the whole install. Each clone runs
+    # under its own `|| true` and we log failures.
     lines = [
-        "set -e",
-        "cd /runpod-volume/ComfyUI/custom_nodes",
+        "cd /runpod-volume/ComfyUI/custom_nodes || exit 1",
+        "FAILED_CLONES=''",
     ]
     for dirname, (url, req) in repos.items():
         lines.append(f'if [ ! -d "{dirname}" ]; then')
-        lines.append(f'  echo "[ensure_nodes] cloning {dirname}"')
-        lines.append(f'  git clone --depth 1 {url} {dirname}')
+        lines.append(f'  echo "[ensure_nodes] cloning {dirname} from {url}"')
+        lines.append(f'  if git clone --depth 1 {url} {dirname}; then')
+        lines.append(f'    echo "[ensure_nodes] cloned {dirname}"')
+        lines.append(f'  else')
+        lines.append(f'    echo "[ensure_nodes] FAILED to clone {dirname} ({url})"')
+        lines.append(f'    FAILED_CLONES="$FAILED_CLONES {dirname}"')
+        lines.append(f'    continue')
+        lines.append(f'  fi')
         lines.append(f'else')
         lines.append(f'  echo "[ensure_nodes] {dirname} already present, updating"')
         lines.append(f'  (cd {dirname} && git pull --quiet) || true')
@@ -181,4 +185,8 @@ def install_script(installable_nodes: set[str]) -> str:
             lines.append(f'if [ -f "{dirname}/{req}" ]; then')
             lines.append(f'  python3.11 -m pip install --quiet -r "{dirname}/{req}" || true')
             lines.append(f'fi')
+    lines.append('if [ -n "$FAILED_CLONES" ]; then')
+    lines.append('  echo "[ensure_nodes] some clones failed:$FAILED_CLONES (their nodes will be unavailable)"')
+    lines.append('fi')
+    lines.append('exit 0')  # always succeed at script level
     return "\n".join(lines)
