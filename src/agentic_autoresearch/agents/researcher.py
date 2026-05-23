@@ -378,11 +378,16 @@ def validate_and_register_workflows(*, parsed: dict, experiment_repo: Path,
         if not path.exists():
             print(f"[researcher] workflow file missing: {path}")
             continue
-        # JSON parse check
+        # JSON parse check — workflows are TEMPLATES with {placeholders}
+        # so naive json.loads fails. Substitute placeholders first.
         try:
-            json.loads(path.read_text())
+            import re as _re
+            text = path.read_text()
+            tmp = _re.sub(r'"\{[a-zA-Z_][a-zA-Z0-9_]*\}"', '"x"', text)
+            tmp = _re.sub(r'\{[a-zA-Z_][a-zA-Z0-9_]*\}', '0', tmp)
+            json.loads(tmp)
         except json.JSONDecodeError as e:
-            print(f"[researcher] {file} is not valid JSON: {e}; removing")
+            print(f"[researcher] {file} is not valid JSON template: {e}; removing")
             path.unlink()
             continue
         # Register as external_claim in world model.
