@@ -657,10 +657,14 @@ def _ship_pod_runtime(pod: PodHandle, spec: ProblemSpec) -> None:
     # Then framework runtime deps (eval pipeline). Also into 3.11 so the
     # pod_runtime invocation can import everything. boto3 is needed for the
     # S3-API publish step.
-    print(f"[ship] pip(3.11) install eval pipeline deps")
+    # piexif: Impact Pack imports it at module load; missing it makes
+    # FaceDetailer + UltralyticsDetectorProvider silently unavailable to
+    # ComfyUI workflows. Critical for any FaceDetailer-bearing workflow.
+    print(f"[ship] pip(3.11) install eval pipeline + Impact Pack deps")
     rc = _ssh(pod,
-        f"{PIP} boto3 pyyaml pillow open_clip_torch mediapipe huggingface_hub",
-        timeout=600,
+        f"{PIP} boto3 pyyaml pillow open_clip_torch mediapipe huggingface_hub "
+        f"piexif segment_anything mmcv ultralytics dill matrix-client",
+        timeout=900,
     )
     if rc != 0:
         print(f"[ship] WARNING: eval pip returned {rc}; continuing anyway")
