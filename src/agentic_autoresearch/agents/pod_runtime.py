@@ -65,21 +65,71 @@ def render_template(template_text: str, params: dict) -> dict:
         # Then bare {k} for numeric/raw placeholders.
         out = re.sub(r'\{' + re.escape(k) + r'\}', encoded, out)
 
+    # Domain-aware defaults for common workflow knobs. These are
+    # sensible values when the planner doesn't supply them — a
+    # FaceDetailer pass with denoise=0 + steps=0 would no-op,
+    # which is worse than failing.
+    DOMAIN_DEFAULTS_NUMERIC = {
+        # FaceDetailer
+        "detailer_denoise":   0.45,
+        "detailer_steps":     20,
+        "detailer_cfg":       1.0,
+        "detailer_id_weight": 1.0,
+        "face_crop_size":     1024,
+        "facedetailer_crop_size": 1024,
+        "bbox_crop_factor":   1.5,
+        "bbox_threshold":     0.5,
+        "feather":            5,
+        "guide_size":         1024,
+        # PuLID
+        "id_weight":          0.85,
+        "pulid_id_weight":    0.85,
+        "id_weight_base":     0.85,
+        "id_weight_detailer": 1.0,
+        # KSampler
+        "cfg":                1.0,
+        "steps":              30,
+        "denoise":            1.0,
+        # Image dims
+        "width":              1024,
+        "height":             1024,
+        # LoRA
+        "lora_strength":      0.7,
+        # ModelSamplingFlux
+        "model_sampling_flux_shift": 1.15,
+        "shift":              1.15,
+        # Detail Daemon
+        "detail_amount":      0.4,
+        # Upscale
+        "upscale_steps":      15,
+        "upscale_denoise":    0.2,
+        "upscale_by":         1.5,
+    }
+    DOMAIN_DEFAULTS_STR = {
+        "negative_prompt":    "",
+        "negative_prompt_add": "",
+        "positive_prompt_prefix": "",
+        "negative_prompt_prefix": "",
+        "face_image":         "identity.png",
+        "lora_name":          "",
+        "checkpoint":         "",
+    }
+
     # ANY remaining {placeholder} = template-key the workflow expected
-    # but we didn't supply. Substitute sensible defaults so the JSON
-    # parses (otherwise the whole iter fails). Use:
-    #   "{key}"  → ""          (empty string)
-    #   bare {key} → 0          (numeric)
-    # plus log a warning so the actor/researcher knows.
+    # but we didn't supply. Apply domain default if known, else
+    # 0 (numeric) / "" (string) fallback. Log a warning so the
+    # actor/researcher knows.
     leftovers_str = set(re.findall(r'"\{([a-zA-Z_][a-zA-Z0-9_]*)\}"', out))
     leftovers_bare = set(re.findall(r'(?<!")\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!")', out))
     if leftovers_str or leftovers_bare:
-        print(f"[render_template] WARNING: defaulting unsupplied placeholders: "
+        print(f"[render_template] defaulting unsupplied placeholders: "
               f"str={sorted(leftovers_str)} num={sorted(leftovers_bare)}")
     for k in leftovers_str:
-        out = re.sub(r'"\{' + re.escape(k) + r'\}"', '""', out)
+        val = DOMAIN_DEFAULTS_STR.get(k, "")
+        out = re.sub(r'"\{' + re.escape(k) + r'\}"', json.dumps(val), out)
     for k in leftovers_bare:
-        out = re.sub(r'\{' + re.escape(k) + r'\}', '0', out)
+        val = DOMAIN_DEFAULTS_NUMERIC.get(k, 0)
+        out = re.sub(r'\{' + re.escape(k) + r'\}', json.dumps(val), out)
 
     return json.loads(out)
 
