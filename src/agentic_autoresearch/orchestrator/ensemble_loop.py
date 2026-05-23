@@ -85,6 +85,7 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
     print(f"[ensemble] seeds per config: {seeds_per}")
 
     pod: PodHandle | None = None
+    iters_root = project_dir(project) / "iters"  # defined here so finally: REPORT can use it
     try:
         # Start ONE pod for the entire run. Re-used across iters.
         print(f"[ensemble] starting pod (gpus={creds.runpod.gpus}, dc={creds.runpod.datacenter})")
@@ -108,7 +109,6 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
         _start_comfyui(pod)
 
         # Run iterations until target / budget / plateau.
-        iters_root = project_dir(project) / "iters"
         plateau_count = 0
         plateau_threshold = 5           # iters w/o improvement → stop
         last_best = 0.0
@@ -657,13 +657,16 @@ def _ship_pod_runtime(pod: PodHandle, spec: ProblemSpec) -> None:
     # Then framework runtime deps (eval pipeline). Also into 3.11 so the
     # pod_runtime invocation can import everything. boto3 is needed for the
     # S3-API publish step.
-    # piexif: Impact Pack imports it at module load; missing it makes
-    # FaceDetailer + UltralyticsDetectorProvider silently unavailable to
-    # ComfyUI workflows. Critical for any FaceDetailer-bearing workflow.
+    # piexif + dill: Impact Pack imports them at module load.
+    # ultralytics: needed for UltralyticsDetectorProvider.
+    # segment_anything: needed for SAMLoader.
+    # NOT including mmcv — it compiles from source for 15+ min and most
+    # workflows don't actually need it. Impact Pack will skip optional
+    # nodes that depend on it.
     print(f"[ship] pip(3.11) install eval pipeline + Impact Pack deps")
     rc = _ssh(pod,
         f"{PIP} boto3 pyyaml pillow open_clip_torch mediapipe huggingface_hub "
-        f"piexif segment_anything mmcv ultralytics dill matrix-client",
+        f"piexif dill segment_anything ultralytics",
         timeout=900,
     )
     if rc != 0:
