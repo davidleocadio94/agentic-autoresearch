@@ -63,11 +63,24 @@ def render_template(template_text: str, params: dict) -> dict:
         # as a string literal.
         out = re.sub(r'"\{' + re.escape(k) + r'\}"', encoded, out)
         # Then bare {k} for numeric/raw placeholders.
-        if isinstance(v, str):
-            # for raw {k} of a string value, JSON-encode (adds quotes).
-            out = re.sub(r'\{' + re.escape(k) + r'\}', encoded, out)
-        else:
-            out = re.sub(r'\{' + re.escape(k) + r'\}', encoded, out)
+        out = re.sub(r'\{' + re.escape(k) + r'\}', encoded, out)
+
+    # ANY remaining {placeholder} = template-key the workflow expected
+    # but we didn't supply. Substitute sensible defaults so the JSON
+    # parses (otherwise the whole iter fails). Use:
+    #   "{key}"  → ""          (empty string)
+    #   bare {key} → 0          (numeric)
+    # plus log a warning so the actor/researcher knows.
+    leftovers_str = set(re.findall(r'"\{([a-zA-Z_][a-zA-Z0-9_]*)\}"', out))
+    leftovers_bare = set(re.findall(r'(?<!")\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!")', out))
+    if leftovers_str or leftovers_bare:
+        print(f"[render_template] WARNING: defaulting unsupplied placeholders: "
+              f"str={sorted(leftovers_str)} num={sorted(leftovers_bare)}")
+    for k in leftovers_str:
+        out = re.sub(r'"\{' + re.escape(k) + r'\}"', '""', out)
+    for k in leftovers_bare:
+        out = re.sub(r'\{' + re.escape(k) + r'\}', '0', out)
+
     return json.loads(out)
 
 
