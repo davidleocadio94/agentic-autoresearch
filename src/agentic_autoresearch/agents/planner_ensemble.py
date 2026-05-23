@@ -68,6 +68,12 @@ SAVED CONFIGURATIONS (configs that produced concrete results):
 REFUTED THOUGHTS (DO NOT re-propose these):
 {refuted_thoughts_block}
 
+BLACKLISTED WORKFLOWS (these have failed multiple consecutive iters;
+DO NOT pick them this turn, even if their target stack is appealing.
+Either pick a different workflow OR set needs_research to ask for a
+working alternative):
+{blacklist_block}
+
 ═════════════════════════════════════════════════════════
 AVAILABLE WORKFLOW TEMPLATES
 ═════════════════════════════════════════════════════════
@@ -213,7 +219,8 @@ def _format_directions(iters_root: Path, n: int = 3) -> str:
 
 
 def build_planner_prompt(*, project: str, iter_num: int, spec_repo: Path,
-                         iters_root: Path) -> str:
+                         iters_root: Path,
+                         workflow_blacklist: dict[str, int] | None = None) -> str:
     with WorldModel(project) as wm:
         snapshot = wm.snapshot(top_k_beliefs=12)
         # snapshot only returns top configs via best_configuration; manually
@@ -232,6 +239,15 @@ def build_planner_prompt(*, project: str, iter_num: int, spec_repo: Path,
                 "param_dict": json.loads(r["param_dict"] or "{}"),
             })
 
+    blacklist = workflow_blacklist or {}
+    if blacklist:
+        blacklist_block = "\n".join(
+            f"  - {wf} (failed {n} consecutive iters)"
+            for wf, n in blacklist.items() if n >= 2
+        ) or "  (none)"
+    else:
+        blacklist_block = "  (none)"
+
     return PLANNER_PROMPT_TEMPLATE.format(
         prev_iter=iter_num - 1,
         iter_num=iter_num,
@@ -240,17 +256,20 @@ def build_planner_prompt(*, project: str, iter_num: int, spec_repo: Path,
         intuitions_block=_format_intuitions(snapshot.get("intuitions", [])),
         configurations_block=_format_configurations(configs),
         refuted_thoughts_block=_format_refuted(snapshot.get("refuted_thoughts", [])),
+        blacklist_block=blacklist_block,
         workflows_block=_format_workflows(spec_repo),
         recent_directions_block=_format_directions(iters_root, n=3),
     )
 
 
 def plan(*, project: str, iter_num: int, spec_repo: Path, iters_root: Path,
-         log_path: Path | None = None) -> dict | None:
+         log_path: Path | None = None,
+         workflow_blacklist: dict[str, int] | None = None) -> dict | None:
     """Spawn claude -p planner. Returns parsed hypothesis or None."""
     prompt = build_planner_prompt(
         project=project, iter_num=iter_num,
         spec_repo=spec_repo, iters_root=iters_root,
+        workflow_blacklist=workflow_blacklist,
     )
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)

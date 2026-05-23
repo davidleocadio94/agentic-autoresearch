@@ -54,6 +54,44 @@ NODE_CATALOG: dict[str, tuple[str, str, str | None]] = {
     # Was Node Suite (kitchen sink)
     "Image Filter Adjustments":     ("https://github.com/WASasquatch/was-node-suite-comfyui",
                                       "was-node-suite-comfyui", "requirements.txt"),
+
+    # InfuseNet — alt identity preservation method, often paired with Flux
+    "InfuseNetApply":               ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
+                                      "ComfyUI_InfuseNet", "requirements.txt"),
+    "InfuseNetLoader":              ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
+                                      "ComfyUI_InfuseNet", "requirements.txt"),
+    "IDEmbeddingModelLoader":       ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
+                                      "ComfyUI_InfuseNet", "requirements.txt"),
+    "ExtractIDEmbedding":           ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
+                                      "ComfyUI_InfuseNet", "requirements.txt"),
+    "ExtractFacePoseImage":         ("https://github.com/ToTheBeginning/ComfyUI_InfuseNet",
+                                      "ComfyUI_InfuseNet", "requirements.txt"),
+
+    # InstantID
+    "InstantIDLoader":              ("https://github.com/cubiq/ComfyUI_InstantID",
+                                      "ComfyUI_InstantID", "requirements.txt"),
+    "InstantIDFaceAnalysis":        ("https://github.com/cubiq/ComfyUI_InstantID",
+                                      "ComfyUI_InstantID", "requirements.txt"),
+    "ApplyInstantID":               ("https://github.com/cubiq/ComfyUI_InstantID",
+                                      "ComfyUI_InstantID", "requirements.txt"),
+
+    # Florence2 (vision-language for caption/region tasks)
+    "DownloadAndLoadFlorence2Model": ("https://github.com/kijai/ComfyUI-Florence2",
+                                       "ComfyUI-Florence2", "requirements.txt"),
+    "Florence2Run":                 ("https://github.com/kijai/ComfyUI-Florence2",
+                                      "ComfyUI-Florence2", "requirements.txt"),
+
+    # rgthree (commonly needed for graph operations Flux workflows use)
+    "Image Comparer (rgthree)":     ("https://github.com/rgthree/rgthree-comfy",
+                                      "rgthree-comfy", "requirements.txt"),
+
+    # ClownsharKSampler / RES4LYF (advanced samplers)
+    "ClownsharKSampler":            ("https://github.com/ClownsharkBatwing/RES4LYF",
+                                      "RES4LYF", "requirements.txt"),
+
+    # CLIPTextEncodeFlux — actually built into newer ComfyUI but include
+    # as alias in case the catalog hits this name from older workflows
+    # (no install needed; treat as builtin alias)
 }
 
 
@@ -82,7 +120,7 @@ def required_nodes_in_workflow(workflow_path: Path) -> set[str]:
 BUILTIN_NODES = {
     "CheckpointLoaderSimple", "LoraLoader", "LoraLoaderModelOnly",
     "UNETLoader", "VAELoader", "CLIPLoader", "DualCLIPLoader",
-    "CLIPTextEncode", "EmptyLatentImage", "EmptySD3LatentImage",
+    "CLIPTextEncode", "CLIPTextEncodeFlux", "EmptyLatentImage", "EmptySD3LatentImage",
     "KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced",
     "VAEDecode", "VAEEncode", "SaveImage", "PreviewImage", "LoadImage",
     "ImageScale", "ImageScaleBy", "LatentUpscale", "LatentUpscaleBy",

@@ -114,6 +114,11 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
         last_best = 0.0
         RESEARCHER_EVERY_N_ITERS = 5    # ambient research cadence
 
+        # Track which workflows keep failing — feed to planner as
+        # "AVOID THESE" so it doesn't loop on a broken workflow.
+        workflow_failure_counts: dict[str, int] = {}
+        WORKFLOW_FAILURE_BLACKLIST_AT = 2  # 2 consecutive fails → blacklist
+
         # Run researcher ONCE at startup so the planner has fresh
         # external_claim beliefs before iter 1 fires.
         from agentic_autoresearch.agents.researcher import (
@@ -161,6 +166,7 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                     project=project, iter_num=iter_num,
                     spec_repo=spec.repo_path, iters_root=iters_root,
                     log_path=planner_log,
+                    workflow_blacklist=workflow_failure_counts,
                 )
                 if hyp is None:
                     print(f"[ensemble] planner returned None; falling back to replicate-best")
@@ -227,6 +233,30 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                 iter_volume=iter_volume,
             )
             print(f"[ensemble] iter {iter_num}: {'OK' if ok else 'FAILED'}")
+
+            if ok:
+                # reset failure count on success
+                workflow_failure_counts.pop(workflow_template, None)
+            else:
+                workflow_failure_counts[workflow_template] = (
+                    workflow_failure_counts.get(workflow_template, 0) + 1
+                )
+                if workflow_failure_counts[workflow_template] >= WORKFLOW_FAILURE_BLACKLIST_AT:
+                    print(f"[ensemble] BLACKLIST: workflow {workflow_template} "
+                          f"has failed {workflow_failure_counts[workflow_template]} consecutive times; "
+                          f"planner will be told to AVOID it")
+                # Record as a belief so future planners see the failure pattern.
+                try:
+                    with WorldModel(project) as wm:
+                        wm.add_belief(
+                            content=(f"Workflow {workflow_template} failed iter {iter_num} "
+                                     f"(consecutive fails: {workflow_failure_counts[workflow_template]}). "
+                                     f"Likely a missing custom node, broken graph, or unrenderable template."),
+                            confidence=0.7,
+                            evidence_iters=[f"{run_id}:iter_{iter_num:04d}"],
+                        )
+                except Exception:
+                    pass
 
             # Check target after each iter.
             best = _best_so_far(project)
@@ -682,19 +712,27 @@ def _ensure_nodes_installed(pod: PodHandle, workflow_path: Path) -> None:
         return
     # Restart ComfyUI so it picks up new nodes
     print(f"[ensure_nodes] restarting ComfyUI to load new nodes")
-    _ssh(pod, "pkill -f 'main.py --listen' 2>/dev/null; sleep 2; "
+    _ssh(pod, "pkill -f 'main.py --listen' 2>/dev/null; sleep 3; "
               "cd /runpod-volume/ComfyUI && "
               "(setsid nohup python3.11 main.py --listen 0.0.0.0 --port 8188 "
               "</dev/null >/runpod-volume/comfyui.log 2>&1 &) && echo restarted",
               timeout=30)
-    # Wait for it
-    deadline = time.time() + 180
+    # Wait for it. Custom nodes with heavy deps (mmcv, ultralytics)
+    # can take 3+ min to import on first boot.
+    deadline = time.time() + 600
+    last_diag = 0.0
     while time.time() < deadline:
         if _ssh(pod, "curl --max-time 5 -sf http://127.0.0.1:8188/system_stats >/dev/null", timeout=20) == 0:
             print(f"[ensure_nodes] ComfyUI back up")
             return
-        time.sleep(10)
-    print(f"[ensure_nodes] WARNING: ComfyUI didn't come back up cleanly")
+        if time.time() - last_diag > 60:
+            # Show tail of comfyui.log so we can diagnose what's blocking
+            print(f"[ensure_nodes] still waiting; comfyui.log tail:")
+            _ssh(pod, "tail -8 /runpod-volume/comfyui.log 2>/dev/null | head -8 || true", timeout=15)
+            last_diag = time.time()
+        time.sleep(15)
+    print(f"[ensure_nodes] WARNING: ComfyUI didn't come back up cleanly after 10 min")
+    _ssh(pod, "tail -40 /runpod-volume/comfyui.log 2>/dev/null", timeout=15)
 
 
 def _start_comfyui(pod: PodHandle, timeout_seconds: float = 600.0) -> None:
