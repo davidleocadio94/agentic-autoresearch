@@ -77,6 +77,16 @@ working alternative):
 ═════════════════════════════════════════════════════════
 AVAILABLE WORKFLOW TEMPLATES
 ═════════════════════════════════════════════════════════
+Each workflow is tagged with whether the framework can run it:
+  [RUNNABLE]            all nodes are vanilla ComfyUI or in NODE_CATALOG
+                         (ensure_nodes can install them on the pod)
+  [MISSING-NODES:...]   workflow cites custom nodes the framework can't
+                         install. Picking this workflow WILL fail.
+
+PREFER [RUNNABLE] WORKFLOWS. If you pick a [MISSING-NODES] workflow,
+the iter WILL FAIL — instead set needs_research to ask for an
+alternative workflow that hits the same goal with runnable nodes.
+
 {workflows_block}
 
 ═════════════════════════════════════════════════════════
@@ -175,7 +185,17 @@ def _format_external_claims(claims: list) -> str:
 
 
 def _format_workflows(spec_repo: Path) -> str:
-    """List workflows/ + their seed.jsonl entries if present."""
+    """List workflows that the framework can ACTUALLY run.
+
+    Each workflow gets tagged as:
+      [RUNNABLE]    all required nodes exist (BUILTIN or in NODE_CATALOG)
+      [MISSING:n]   needs n nodes the framework can't install
+                     → marked so the planner knows to AVOID unless it
+                     also sets needs_research
+    """
+    from agentic_autoresearch.agents.ensure_nodes import (
+        BUILTIN_NODES, NODE_CATALOG, required_nodes_in_workflow,
+    )
     workflows_dir = spec_repo / "workflows"
     seed_path = spec_repo / "references" / "seed.jsonl"
     seed_by_workflow: dict[str, dict] = {}
@@ -192,12 +212,22 @@ def _format_workflows(spec_repo: Path) -> str:
             except json.JSONDecodeError:
                 continue
     lines = []
+    runnable_count = 0
     if workflows_dir.exists():
         for wf in sorted(workflows_dir.glob("*.json")):
             entry = seed_by_workflow.get(wf.name) or {}
             note = entry.get("note") or entry.get("stack") or ""
-            lines.append(f"  {wf.name}  ({entry.get('name', '?')}) — {note}")
-    return "\n".join(lines) or "  (no workflows declared)"
+            required = required_nodes_in_workflow(wf)
+            missing = required - BUILTIN_NODES - set(NODE_CATALOG.keys())
+            if not missing:
+                tag = "[RUNNABLE]"
+                runnable_count += 1
+            else:
+                tag = f"[MISSING-NODES:{','.join(sorted(missing)[:3])}{'...' if len(missing)>3 else ''}]"
+            lines.append(f"  {tag} {wf.name}  ({entry.get('name', '?')}) — {note}")
+    out = "\n".join(lines) or "  (no workflows declared)"
+    out += f"\n\n  Total runnable: {runnable_count} / {len(lines) if lines else 0}"
+    return out
 
 
 def _format_directions(iters_root: Path, n: int = 3) -> str:
