@@ -279,8 +279,90 @@ def run_ensemble_loop(spec_path: Path, opts: EnsembleLoopOptions | None = None) 
                 stop_pod(creds.runpod.api_key, pod.pod_id, project_dir(project))
             except Exception as e:
                 print(f"[ensemble] failed to stop pod: {e}")
+        # Write per-run report regardless of exit reason.
+        try:
+            _write_run_report(project=project, run_id=run_id,
+                              iters_root=iters_root, target_composite=target_composite,
+                              target_arcface=target_arcface)
+        except Exception as e:
+            print(f"[ensemble] could not write REPORT.md: {e}")
 
     return run_id
+
+
+def _write_run_report(*, project: str, run_id: str, iters_root: Path,
+                       target_composite: float, target_arcface: float) -> None:
+    """Generate a REPORT.md summarizing this run."""
+    out_path = project_dir(project) / f"REPORT-{run_id[:8]}.md"
+    lines: list[str] = []
+    lines.append(f"# Run {run_id[:8]} — comfyui-character")
+    lines.append("")
+    lines.append(f"> generated: {datetime.now(timezone.utc).isoformat()}")
+    lines.append(f"> target: composite ≥ {target_composite}, arcface ≥ {target_arcface}")
+    lines.append("")
+
+    # Per-iter summary
+    lines.append("## Iterations")
+    lines.append("")
+    lines.append("| iter | category | workflow | composite | arcface | next_direction |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    for d in sorted(iters_root.iterdir()):
+        if not d.is_dir() or not d.name.startswith("iter_"):
+            continue
+        scores_path = d / "scores.json"
+        hyp_path = d / "hypothesis.json"
+        ref_path = d / "reflection.json"
+        if not scores_path.exists():
+            continue
+        try:
+            s = json.loads(scores_path.read_text())
+            ps = s.get("per_signal", {})
+            comp = ps.get("composite", {}).get("mean", 0)
+            arc = ps.get("arcface_cosine", {}).get("mean", 0)
+        except Exception:
+            comp, arc = 0, 0
+        category = "?"
+        workflow = "?"
+        if hyp_path.exists():
+            try:
+                h = json.loads(hyp_path.read_text())
+                category = h.get("category", "?")
+                workflow = h.get("workflow_template", "?")
+            except Exception:
+                pass
+        nd = ""
+        if ref_path.exists():
+            try:
+                r = json.loads(ref_path.read_text())
+                nd = (r.get("next_direction") or "")[:90].replace("|", "/")
+            except Exception:
+                pass
+        lines.append(
+            f"| {d.name[5:]} | {category} | {workflow} | {comp:.2f} | {arc:.2f} | {nd} |"
+        )
+    lines.append("")
+
+    # Best config + top beliefs
+    with WorldModel(project) as wm:
+        best = wm.best_configuration()
+        beliefs = wm.active_beliefs(limit=12)
+    lines.append("## Best configuration")
+    if best:
+        lines.append(f"- name: `{best.name}`")
+        lines.append(f"- composite: {best.composite_mean:.3f} ± {best.best_score_std or 0:.3f}")
+        lines.append(f"- arcface_mean: {best.arcface_mean or 0:.3f}")
+        lines.append(f"- workflow: {(best.param_dict or {}).get('workflow_template', '?')}")
+    else:
+        lines.append("(no configurations saved)")
+    lines.append("")
+    lines.append("## Top active beliefs (recency × confidence)")
+    for b in beliefs:
+        lines.append(f"- `belief:{b.id}` conf={b.confidence:.2f} ev={len(b.evidence_iters)}iter")
+        lines.append(f"  - {b.content[:300]}")
+    lines.append("")
+
+    out_path.write_text("\n".join(lines))
+    print(f"[ensemble] wrote {out_path}")
 
 
 # ─── per-iter execution ──────────────────────────────────────────────
@@ -747,7 +829,19 @@ def _pick_iter(iter_num: int, forced: list[str], spec: ProblemSpec,
         for line in seed_path.read_text().splitlines():
             line = line.strip()
             if not line: continue
-            seeds.append(json.loads(line))
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Drop entries whose workflow_template file doesn't actually
+            # exist on disk (e.g. researcher wrote a seed entry but the
+            # workflow JSON got removed by a validator failure).
+            wf_rel = entry.get("workflow_template", "")
+            if wf_rel and not (spec.repo_path / wf_rel).exists():
+                print(f"[_pick_iter] skipping seed entry {entry.get('name')!r}: "
+                      f"workflow {wf_rel} missing on disk")
+                continue
+            seeds.append(entry)
     seed_by_name = {s["name"]: s for s in seeds}
 
     if iter_num <= len(forced):
